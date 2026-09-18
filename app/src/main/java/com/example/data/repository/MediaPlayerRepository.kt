@@ -15,6 +15,7 @@ import com.example.data.model.WatchHistoryEntity
 import com.example.util.MediaTitleHelper
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class MediaPlayerRepository(
     private val watchHistoryDao: WatchHistoryDao,
@@ -31,6 +32,14 @@ class MediaPlayerRepository(
     val downloadsList: Flow<List<DownloadItemEntity>> = downloadDao.getAllDownloads()
     val settingsFlow: Flow<PlayerSettingsEntity> = playerSettingsDao.getSettingsFlow()
         .map { it ?: PlayerSettingsEntity() }
+
+    init {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                watchHistoryDao.deleteLiveStreams()
+            } catch (_: Exception) {}
+        }
+    }
         
     suspend fun getSettings(): PlayerSettingsEntity {
         return playerSettingsDao.getSettings() ?: PlayerSettingsEntity()
@@ -44,7 +53,7 @@ class MediaPlayerRepository(
         durationMs: Long,
         streamType: String = "VIDEO"
     ) {
-        if (url.isBlank()) return
+        if (url.isBlank() || streamType == "M3U_STREAM" || streamType == "LIVE") return
         val allHistory = watchHistoryDao.getAllHistoryList()
         val effectiveTitle = title.ifBlank { url.substringAfterLast("/").substringBefore("?") }
 

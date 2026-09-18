@@ -69,10 +69,8 @@ fun HistoryScreen(
     modifier: Modifier = Modifier
 ) {
     val historyList by viewModel.historyList.collectAsState()
-    val browserHistory by viewModel.browserHistory.collectAsState()
     val downloadsList by viewModel.downloads.collectAsState()
     var showClearDialog by remember { mutableStateOf(false) }
-    var showClearWebDialog by remember { mutableStateOf(false) }
     var selectedTabIndex by remember { mutableStateOf(0) }
 
     Scaffold(
@@ -88,7 +86,6 @@ fun HistoryScreen(
                         Text(
                             text = when (selectedTabIndex) {
                                 0 -> "İzleme geçmişiniz ve kayıtlarınız"
-                                1 -> "Web tarayıcısı gezinme geçmişiniz"
                                 else -> "Çevrimdışı izlenebilir indirilen medyalar"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -105,17 +102,6 @@ fun HistoryScreen(
                             Icon(
                                 imageVector = Icons.Default.DeleteSweep,
                                 contentDescription = "İzleme Geçmişini Temizle",
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        }
-                    } else if (selectedTabIndex == 1 && browserHistory.isNotEmpty()) {
-                        IconButton(
-                            onClick = { showClearWebDialog = true },
-                            modifier = Modifier.testTag("clear_web_history_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DeleteSweep,
-                                contentDescription = "Web Geçmişini Temizle",
                                 tint = MaterialTheme.colorScheme.error
                             )
                         }
@@ -154,22 +140,7 @@ fun HistoryScreen(
                     onClick = { selectedTabIndex = 1 },
                     text = { 
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Web Geçmişi", fontWeight = if (selectedTabIndex == 1) FontWeight.Bold else FontWeight.Normal)
-                            if (browserHistory.isNotEmpty()) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Badge(containerColor = MaterialTheme.colorScheme.primaryContainer) {
-                                    Text("${browserHistory.size}", color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                }
-                            }
-                        }
-                    }
-                )
-                Tab(
-                    selected = selectedTabIndex == 2,
-                    onClick = { selectedTabIndex = 2 },
-                    text = { 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("İndirilenler", fontWeight = if (selectedTabIndex == 2) FontWeight.Bold else FontWeight.Normal)
+                            Text("İndirilenler", fontWeight = if (selectedTabIndex == 1) FontWeight.Bold else FontWeight.Normal)
                             val activeCount = downloadsList.count { it.status == "DOWNLOADING" || it.status == "QUEUED" }
                             if (activeCount > 0) {
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -187,11 +158,6 @@ fun HistoryScreen(
                     0 -> HistoryContent(
                         historyList = historyList,
                         viewModel = viewModel
-                    )
-                    1 -> BrowserHistoryContent(
-                        browserHistory = browserHistory,
-                        onOpenUrl = onOpenBrowser,
-                        onDelete = { viewModel.deleteBrowserHistory(it) }
                     )
                     else -> DownloadsContent(
                         downloadsList = downloadsList,
@@ -222,32 +188,6 @@ fun HistoryScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showClearDialog = false }) {
-                    Text("İptal")
-                }
-            }
-        )
-    }
-
-    if (showClearWebDialog) {
-        AlertDialog(
-            onDismissRequest = { showClearWebDialog = false },
-            title = { Text("Web Geçmişini Sıfırla") },
-            text = { Text("Tüm internet tarama geçmişiniz silinecektir. Bu işlem geri alınamaz.") },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.clearBrowserHistory()
-                        showClearWebDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Text("Evet, Temizle")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showClearWebDialog = false }) {
                     Text("İptal")
                 }
             }
@@ -1026,176 +966,6 @@ fun HistoryCardItem(
                 color = MaterialTheme.colorScheme.primary,
                 trackColor = MaterialTheme.colorScheme.surfaceVariant
             )
-        }
-    }
-}
-
-@Composable
-fun BrowserHistoryContent(
-    browserHistory: List<BrowserHistoryEntity>,
-    onOpenUrl: (String) -> Unit,
-    onDelete: (BrowserHistoryEntity) -> Unit
-) {
-    var searchQuery by remember { mutableStateOf("") }
-    val filteredList = remember(browserHistory, searchQuery) {
-        if (searchQuery.isBlank()) browserHistory
-        else browserHistory.filter {
-            it.title.contains(searchQuery, ignoreCase = true) ||
-            it.url.contains(searchQuery, ignoreCase = true)
-        }
-    }
-
-    if (browserHistory.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    imageVector = Icons.Default.Language,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.outline
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Web geçmişiniz henüz boş.",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Medium
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Tarayıcıda ziyaret ettiğiniz web sayfaları burada listelenir.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    } else {
-        Column(modifier = Modifier.fillMaxSize()) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Web geçmişinde ara...", fontSize = 13.sp) },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
-                },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Temizle", modifier = Modifier.size(18.dp))
-                        }
-                    }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                )
-            )
-
-            if (filteredList.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "\"$searchQuery\" için sonuç bulunamadı.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(bottom = 80.dp)
-                ) {
-                    items(filteredList, key = { it.id }) { item ->
-                        val dateString = formatDate(item.timestamp)
-                        ListItem(
-                            leadingContent = {
-                                Surface(
-                                    shape = CircleShape,
-                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(40.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.Language,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                    }
-                                }
-                            },
-                            headlineContent = {
-                                Text(
-                                    text = item.title,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 14.sp
-                                )
-                            },
-                            supportingContent = {
-                                Column {
-                                    Text(
-                                        text = item.url,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontSize = 12.sp
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = dateString,
-                                        fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
-                                    )
-                                }
-                            },
-                            trailingContent = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    IconButton(
-                                        onClick = { onOpenUrl(item.url) },
-                                        modifier = Modifier.size(36.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                                            contentDescription = "Tarayıcıda Aç",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { onDelete(item) },
-                                        modifier = Modifier.size(36.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Close,
-                                            contentDescription = "Sil",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
-                            },
-                            modifier = Modifier
-                                .clickable { onOpenUrl(item.url) }
-                        )
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        )
-                    }
-                }
-            }
         }
     }
 }

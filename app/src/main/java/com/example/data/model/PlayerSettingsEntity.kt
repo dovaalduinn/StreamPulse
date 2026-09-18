@@ -23,6 +23,8 @@ data class PlayerSettingsEntity(
     val defaultSearchEngine: String = "Google", // "Google", "Yandex", "DuckDuckGo", "Bing", "Brave"
     val useCustomDns: Boolean = false, // Enable Custom DNS / DoH
     val customDnsUrl: String = "", // Custom DNS DoH URL or IP (e.g., https://dns.adguard-dns.com/dns-query, 1.1.1.1)
+    val allowInsecureSsl: Boolean = false, // Allow insecure SSL certificates for custom IPTV streams
+    val ramBufferLimitMb: Int = 100, // RAM buffer limit in MB for Mode 1 (50, 100, 250, 500, 1024)
     val tvMouseShortcutKeyCode: Int = 82, // 82: KeyEvent.KEYCODE_MENU
     val tvMouseShortcutKeyName: String = "Menü Tuşu (MENU / ≡)",
     val tvAutoEnableMouse: Boolean = false, // Automatically turn on virtual mouse when opening browser

@@ -266,7 +266,7 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     fun updateWatchProgress(positionMs: Long, durationMs: Long, force: Boolean = false) {
         val current = _activeVideo.value ?: return
-        if (current.url.isBlank()) return
+        if (current.url.isBlank() || current.isLive) return
         
         // Prevent spurious 0-ms updates during initial stream preparation if started with positive offset
         if (positionMs == 0L && current.startPositionMs > 0L && !force) {
@@ -292,14 +292,14 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 posterUrl = current.posterUrl,
                 positionMs = positionMs,
                 durationMs = durationMs,
-                streamType = if (current.isLive) "M3U_STREAM" else "VIDEO"
+                streamType = "VIDEO"
             )
         }
     }
 
     fun closePlayer(currentPositionMs: Long = -1L, durationMs: Long = -1L) {
         val current = _activeVideo.value
-        if (current != null && current.url.isNotBlank()) {
+        if (current != null && current.url.isNotBlank() && !current.isLive) {
             val finalPos = if (currentPositionMs >= 0) {
                 currentPositionMs
             } else if (lastSavedHistoryPositionMs >= 0) {
@@ -316,7 +316,7 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     posterUrl = current.posterUrl,
                     positionMs = finalPos,
                     durationMs = finalDur,
-                    streamType = if (current.isLive) "M3U_STREAM" else "VIDEO"
+                    streamType = "VIDEO"
                 )
             }
         }

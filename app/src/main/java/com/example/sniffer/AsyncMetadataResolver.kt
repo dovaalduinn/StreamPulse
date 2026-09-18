@@ -35,6 +35,23 @@ class AsyncMetadataResolver {
         var connection: HttpURLConnection? = null
         return try {
             val url = URL(urlString)
+            val host = url.host ?: return null
+            val inetAddress = java.net.InetAddress.getByName(host)
+            if (inetAddress.isLoopbackAddress || inetAddress.isSiteLocalAddress || inetAddress.isAnyLocalAddress || inetAddress.isLinkLocalAddress) {
+                return null
+            }
+            val hostAddress = inetAddress.hostAddress ?: ""
+            if (hostAddress.startsWith("127.") || hostAddress.startsWith("10.") || hostAddress.startsWith("192.168.") || hostAddress.startsWith("0.") || hostAddress == "::1" || hostAddress.startsWith("fe80:")) {
+                return null
+            }
+            if (hostAddress.startsWith("172.")) {
+                val parts = hostAddress.split(".")
+                if (parts.size >= 2) {
+                    val second = parts[1].toIntOrNull() ?: 0
+                    if (second in 16..31) return null
+                }
+            }
+
             connection = url.openConnection() as HttpURLConnection
             connection.connectTimeout = 4000
             connection.readTimeout = 4000

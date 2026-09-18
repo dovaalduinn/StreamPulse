@@ -77,6 +77,7 @@ import java.util.concurrent.TimeUnit
 val VlcOrange = Color(0xFFFF7700)
 val VlcBufferOrange = Color(0xFFFFB366).copy(alpha = 0.65f)
 val VlcBufferYellow = Color(0xFFFFEB3B).copy(alpha = 0.90f)
+val VlcBufferGreen = Color(0xFF4CAF50)
 
 data class TrackInfo(
     val groupIndex: Int,
@@ -122,10 +123,14 @@ fun CustomVideoPlayer(
     val window = activity?.window
     val coroutineScope = rememberCoroutineScope()
 
+    val isDownloadedVideo = isOffline || url.startsWith("file://") || url.startsWith("content://") || url.startsWith("/")
+    val isLiveStream = isLive
+    val effectiveFastCacheMode = if (isDownloadedVideo || isLiveStream) 0 else settings.fastCacheMode
+
     // Temporary session cache with full auto-cleanup on dispose
-    val exoPlayerAndCache = remember(settings.fastCacheMode) {
-        val newCacheManager = PlayerSessionCacheManager(context, referer, userAgent, headers)
-        val newPlayer = newCacheManager.buildExoPlayer(settings.fastCacheMode)
+    val exoPlayerAndCache = remember(effectiveFastCacheMode, settings.allowInsecureSsl, settings.ramBufferLimitMb) {
+        val newCacheManager = PlayerSessionCacheManager(context, referer, userAgent, headers, settings.allowInsecureSsl, settings.ramBufferLimitMb)
+        val newPlayer = newCacheManager.buildExoPlayer(effectiveFastCacheMode, isLiveStream)
         Pair(newPlayer, newCacheManager)
     }
     val exoPlayer = exoPlayerAndCache.first
@@ -167,6 +172,8 @@ fun CustomVideoPlayer(
     var diskBufferedPositionMs by remember { mutableLongStateOf(0L) }
     var contiguousDiskCacheRatio by remember { mutableFloatStateOf(0f) }
     var cachedSpansRatios by remember { mutableStateOf<List<PlayerSessionCacheManager.CacheSpanRange>>(emptyList()) }
+    // Cumulative persistent cached spans across the entire session to ensure yellow bar never shrinks or disappears when seeking backwards
+    var accumulatedCachedSpans by remember { mutableStateOf<List<PlayerSessionCacheManager.CacheSpanRange>>(emptyList()) }
     var totalDurationMs by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var isSeeking by remember { mutableStateOf(false) }
@@ -219,7 +226,33 @@ fun CustomVideoPlayer(
 
     var showQualityMenu by remember { mutableStateOf(false) }
 
-    val isDownloadedVideo = isOffline || url.startsWith("file://") || url.startsWith("content://")
+    fun clampTargetTimeToValidCachedSpans(targetMs: Long): Long {
+        if (effectiveFastCacheMode != 1 || totalDurationMs <= 0L) return targetMs
+        val targetRatio = (targetMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
+
+        val activeSpans = if (accumulatedCachedSpans.isNotEmpty()) accumulatedCachedSpans else cachedSpansRatios
+        if (activeSpans.isEmpty()) {
+            val fallbackRatio = contiguousDiskCacheRatio
+            val maxAllowed = (totalDurationMs * fallbackRatio).toLong()
+            return targetMs.coerceAtMost(maxAllowed)
+        }
+
+        // Direct match in cached spans
+        for (span in activeSpans) {
+            if (targetRatio in span.startRatio..span.endRatio) {
+                return targetMs
+            }
+        }
+
+        val precedingSpans = activeSpans.filter { it.startRatio <= targetRatio }
+        return if (precedingSpans.isNotEmpty()) {
+            val maxEndRatio = precedingSpans.maxOf { it.endRatio }
+            (totalDurationMs * maxEndRatio).toLong().coerceAtMost(targetMs)
+        } else {
+            val minStartRatio = activeSpans.minOfOrNull { it.startRatio } ?: 0f
+            (totalDurationMs * minStartRatio).toLong().coerceAtMost(targetMs)
+        }
+    }
 
     var isDragging by remember { mutableStateOf(false) }
     var dragType by remember { mutableIntStateOf(0) }
@@ -296,9 +329,14 @@ fun CustomVideoPlayer(
         exoPlayer.playWhenReady = true
         hasAppliedInitialSeek = true
 
-        // Mod 2 & Mod 3 (Baştan Sona) CacheWriter'ı arkaplanda çalıştırarak 0'dan sonuna kadar iter
-        if (settings.fastCacheMode == 2 || settings.fastCacheMode == 3) {
-            cacheManager.startFastPreload(url, coroutineScope)
+        // Mod 1, Mod 2 & Mod 3 CacheWriter'ı arkaplanda çalıştırarak diske indirmeyi başlatır (çevrimdışı ve canlı videolarda çalışmaz)
+        if (!isDownloadedVideo && !isLiveStream && (effectiveFastCacheMode == 1 || effectiveFastCacheMode == 2 || effectiveFastCacheMode == 3)) {
+            cacheManager.startFastPreload(
+                url = url,
+                coroutineScope = coroutineScope,
+                getCurrentPositionMs = { exoPlayer.currentPosition.coerceAtLeast(0L) },
+                getTotalDurationMs = { exoPlayer.duration.coerceAtLeast(0L) }
+            )
         }
     }
 
@@ -311,20 +349,54 @@ fun CustomVideoPlayer(
                 currentPositionMs = pos
                 
                 val exoBuffered = exoPlayer.bufferedPosition.coerceAtLeast(0L)
-                val diskCacheRatio = cacheManager.getCachedPercentage(url)
-                bufferedPositionMs = exoBuffered
-                diskBufferedPositionMs = if (diskCacheRatio >= 0f && dur > 0) {
+                val diskCacheRatio = if (isDownloadedVideo) 1f else cacheManager.getCachedPercentage(url)
+                bufferedPositionMs = if (isDownloadedVideo) dur else exoBuffered
+                diskBufferedPositionMs = if (isDownloadedVideo) dur else if (diskCacheRatio >= 0f && dur > 0) {
                     (dur * diskCacheRatio).toLong()
                 } else {
                     0L
                 }
                 
-                if (settings.fastCacheMode != 0) {
+                if (effectiveFastCacheMode != 0 && effectiveFastCacheMode != 3) {
                     contiguousDiskCacheRatio = cacheManager.getContiguousCachedRatio(url)
-                    cachedSpansRatios = cacheManager.getCachedSpansRatios(url)
+                    val diskSpans = cacheManager.getCachedSpansRatios(url)
+                    cachedSpansRatios = diskSpans
+
+                    // Merge diskSpans, current ExoPlayer RAM buffer [pos/dur .. exoBuffered/dur], and existing accumulatedSpans
+                    val allSpans = mutableListOf<PlayerSessionCacheManager.CacheSpanRange>()
+                    allSpans.addAll(accumulatedCachedSpans)
+                    allSpans.addAll(diskSpans)
+                    if (dur > 0L && exoBuffered > pos) {
+                        val s = (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+                        val e = (exoBuffered.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+                        if (e > s) {
+                            allSpans.add(PlayerSessionCacheManager.CacheSpanRange(s, e))
+                        }
+                    }
+
+                    if (allSpans.isNotEmpty()) {
+                        val sorted = allSpans.sortedBy { it.startRatio }
+                        val merged = mutableListOf<PlayerSessionCacheManager.CacheSpanRange>()
+                        var curStart = sorted[0].startRatio
+                        var curEnd = sorted[0].endRatio
+
+                        for (i in 1 until sorted.size) {
+                            val span = sorted[i]
+                            if (span.startRatio <= curEnd + 0.005f) { // allow smooth adjacent bridge
+                                curEnd = maxOf(curEnd, span.endRatio)
+                            } else {
+                                merged.add(PlayerSessionCacheManager.CacheSpanRange(curStart, curEnd))
+                                curStart = span.startRatio
+                                curEnd = span.endRatio
+                            }
+                        }
+                        merged.add(PlayerSessionCacheManager.CacheSpanRange(curStart, curEnd))
+                        accumulatedCachedSpans = merged
+                    }
                 } else {
                     contiguousDiskCacheRatio = 0f
                     cachedSpansRatios = emptyList()
+                    accumulatedCachedSpans = emptyList()
                 }
                 
                 totalDurationMs = dur
@@ -343,10 +415,12 @@ fun CustomVideoPlayer(
                 isPlaying = playing
             }
 
+            var reconnectAttempts = 0
             override fun onPlaybackStateChanged(playbackState: Int) {
                 isBuffering = playbackState == Player.STATE_BUFFERING
                 if (playbackState == Player.STATE_READY) {
                     totalDurationMs = exoPlayer.duration.coerceAtLeast(0L)
+                    reconnectAttempts = 0
                 }
             }
 
@@ -355,9 +429,19 @@ fun CustomVideoPlayer(
                 if (error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
                     exoPlayer.seekToDefaultPosition()
                     exoPlayer.prepare()
-                } else if (isLive) {
-                    exoPlayer.seekToDefaultPosition()
-                    exoPlayer.prepare()
+                    exoPlayer.playWhenReady = true
+                } else if (isLiveStream || error.cause is androidx.media3.datasource.HttpDataSource.HttpDataSourceException || error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED) {
+                    if (reconnectAttempts < 3) {
+                        reconnectAttempts++
+                        android.util.Log.w("ExoPlayerError", "Canlı yayın bağlantısı koptu, yeniden bağlanılıyor (Deneme $reconnectAttempts/3)...")
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            try {
+                                exoPlayer.seekToDefaultPosition()
+                                exoPlayer.prepare()
+                                exoPlayer.playWhenReady = true
+                            } catch (_: Exception) {}
+                        }, 2500L)
+                    }
                 }
             }
 
@@ -422,15 +506,9 @@ fun CustomVideoPlayer(
                 com.example.ui.viewmodel.PlayerRemoteAction.FORWARD_10S -> {
                     if (!isLocked && totalDurationMs > 0) {
                         val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
-                        var newTime = (currentPos + 10000L).coerceIn(0L, totalDurationMs)
-                        if (settings.fastCacheMode == 2) {
-                            val diskRatio = cacheManager.getCachedPercentage(url)
-                            if (diskRatio in 0f..1f) {
-                                val maxAllowed = (totalDurationMs * diskRatio).toLong()
-                                newTime = newTime.coerceAtMost(maxAllowed)
-                            }
-                        }
-                        if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                        val targetTime = (currentPos + 10000L).coerceIn(0L, totalDurationMs)
+                        val newTime = clampTargetTimeToValidCachedSpans(targetTime)
+                        if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                         exoPlayer.seekTo(newTime)
                         currentPositionMs = newTime
                         doubleTapFeedback = "+10s"
@@ -442,7 +520,7 @@ fun CustomVideoPlayer(
                     if (!isLocked && totalDurationMs > 0) {
                         val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
                         val newTime = (currentPos - 10000L).coerceIn(0L, totalDurationMs)
-                        if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                        if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                         exoPlayer.seekTo(newTime)
                         currentPositionMs = newTime
                         doubleTapFeedback = "-10s"
@@ -549,16 +627,10 @@ fun CustomVideoPlayer(
                         }
                         Key.DirectionRight -> {
                             if (!isLocked && totalDurationMs > 0) {
-                                val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
-                                var newTime = (currentPos + 10000L).coerceIn(0L, totalDurationMs)
-                                if (settings.fastCacheMode == 2) {
-                                    val diskRatio = cacheManager.getCachedPercentage(url)
-                                    if (diskRatio in 0f..1f) {
-                                        val maxAllowed = (totalDurationMs * diskRatio).toLong()
-                                        newTime = newTime.coerceAtMost(maxAllowed)
-                                    }
-                                }
-                                if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                                 val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                                val targetTime = (currentPos + 10000L).coerceIn(0L, totalDurationMs)
+                                val newTime = clampTargetTimeToValidCachedSpans(targetTime)
+                                if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                                 exoPlayer.seekTo(newTime)
                                 currentPositionMs = newTime
                                 doubleTapFeedback = "+10s"
@@ -571,7 +643,7 @@ fun CustomVideoPlayer(
                             if (!isLocked && totalDurationMs > 0) {
                                 val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
                                 val newTime = (currentPos - 10000L).coerceIn(0L, totalDurationMs)
-                                if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                                if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                                 exoPlayer.seekTo(newTime)
                                 currentPositionMs = newTime
                                 doubleTapFeedback = "-10s"
@@ -604,17 +676,10 @@ fun CustomVideoPlayer(
                             val seekOffset = if (isRightSide) 10000L else -10000L
                             val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
                             
-                            var newTime = (currentPos + seekOffset).coerceIn(0L, totalDurationMs)
+                            val rawTargetTime = (currentPos + seekOffset).coerceIn(0L, totalDurationMs)
+                            val newTime = if (isRightSide) clampTargetTimeToValidCachedSpans(rawTargetTime) else rawTargetTime
                             
-                            if (settings.fastCacheMode == 2 && isRightSide) {
-                                val diskRatio = cacheManager.getCachedPercentage(url)
-                                if (diskRatio in 0f..1f) {
-                                    val maxAllowed = (totalDurationMs * diskRatio).toLong()
-                                    newTime = newTime.coerceAtMost(maxAllowed)
-                                }
-                            }
-                            
-                            if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                            if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                             exoPlayer.seekTo(newTime)
                             currentPositionMs = newTime
                             interactionTimestamp = System.currentTimeMillis()
@@ -947,7 +1012,7 @@ fun CustomVideoPlayer(
                                         )
                                     }
                                 }
-                            } else if (settings.fastCacheMode != 0) {
+                            } else if (effectiveFastCacheMode != 0) {
                                 Surface(
                                     shape = RoundedCornerShape(10.dp),
                                     color = Color.Black.copy(alpha = 0.4f),
@@ -1030,35 +1095,61 @@ fun CustomVideoPlayer(
                             // Real-time contiguous buffer ratio in fast cache modes (synced with actual minutes/seconds buffered)
                             val fastCacheContiguousRatio = maxOf(ramBufferRatio, contiguousDiskCacheRatio).coerceIn(0f, 1f)
 
+                            val displaySpans = if (accumulatedCachedSpans.isNotEmpty()) accumulatedCachedSpans else cachedSpansRatios
+
+                            // Helper function to clamp seek ratio to valid cached yellow spans in Mode 1
+                            fun clampToValidCachedRatio(ratio: Float): Float {
+                                if (effectiveFastCacheMode != 1) return ratio
+                                val activeSpans = displaySpans
+                                if (activeSpans.isEmpty()) {
+                                    val fallbackRatio = contiguousDiskCacheRatio
+                                    return ratio.coerceAtMost(fallbackRatio)
+                                }
+                                // Check if requested ratio lands directly inside any cached span
+                                for (span in activeSpans) {
+                                    if (ratio in span.startRatio..span.endRatio) {
+                                        return ratio
+                                    }
+                                }
+                                // If outside, find the latest cached span before this ratio
+                                val precedingSpans = activeSpans.filter { it.startRatio <= ratio }
+                                return if (precedingSpans.isNotEmpty()) {
+                                    precedingSpans.maxOf { it.endRatio }.coerceAtMost(ratio)
+                                } else {
+                                    // Or the start of the first cached span / 0f
+                                    activeSpans.minOfOrNull { it.startRatio }?.coerceAtMost(ratio) ?: 0f
+                                }
+                            }
+
                             BoxWithConstraints(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(26.dp)
-                                    .pointerInput(validTotalDuration) {
+                                    .pointerInput(validTotalDuration, displaySpans) {
                                         detectTapGestures { offset ->
                                             var newRatio = (offset.x / size.width).coerceIn(0f, 1f)
-                                            if (settings.fastCacheMode == 2) {
-                                                val diskRatio = cacheManager.getCachedPercentage(url)
-                                                if (diskRatio in 0f..1f) {
-                                                    newRatio = newRatio.coerceAtMost(diskRatio)
-                                                }
+                                            if (effectiveFastCacheMode == 1) {
+                                                newRatio = clampToValidCachedRatio(newRatio)
                                             }
                                             val targetMs = (newRatio * validTotalDuration).toLong()
-                                            if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                                            if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                                             exoPlayer.seekTo(targetMs)
                                             currentPositionMs = targetMs
+                                            if (effectiveFastCacheMode != 0) {
+                                                contiguousDiskCacheRatio = cacheManager.getContiguousCachedRatio(url)
+                                                cachedSpansRatios = cacheManager.getCachedSpansRatios(url)
+                                            }
                                             interactionTimestamp = System.currentTimeMillis()
                                         }
                                     }
-                                    .pointerInput(validTotalDuration) {
+                                    .pointerInput(validTotalDuration, displaySpans) {
                                         detectDragGestures(
                                             onDragStart = { offset ->
                                                 isSeeking = true
-                                                if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                                                if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                                                 var newRatio = (offset.x / size.width).coerceIn(0f, 1f)
-                                                if (settings.fastCacheMode == 2) {
-                                                    val diskRatio = cacheManager.getCachedPercentage(url)
-                                                    if (diskRatio in 0f..1f) newRatio = newRatio.coerceAtMost(diskRatio)
+                                                if (effectiveFastCacheMode == 1) {
+                                                    newRatio = clampToValidCachedRatio(newRatio)
                                                 }
                                                 seekSliderPosition = (newRatio * validTotalDuration)
                                                 interactionTimestamp = System.currentTimeMillis()
@@ -1066,18 +1157,21 @@ fun CustomVideoPlayer(
                                             onDrag = { change, _ ->
                                                 change.consume()
                                                 var newRatio = (change.position.x / size.width).coerceIn(0f, 1f)
-                                                if (settings.fastCacheMode == 2) {
-                                                    val diskRatio = cacheManager.getCachedPercentage(url)
-                                                    if (diskRatio in 0f..1f) newRatio = newRatio.coerceAtMost(diskRatio)
+                                                if (effectiveFastCacheMode == 1) {
+                                                    newRatio = clampToValidCachedRatio(newRatio)
                                                 }
                                                 seekSliderPosition = (newRatio * validTotalDuration)
                                                 interactionTimestamp = System.currentTimeMillis()
                                             },
                                             onDragEnd = {
-                                                if (settings.fastCacheMode != 2) cacheManager.notifySeekOccurred()
+                                                if (!isDownloadedVideo && !isLiveStream && effectiveFastCacheMode != 1) cacheManager.notifySeekOccurred()
                                                 exoPlayer.seekTo(seekSliderPosition.toLong())
                                                 currentPositionMs = seekSliderPosition.toLong()
                                                 isSeeking = false
+                                                if (effectiveFastCacheMode != 0 && effectiveFastCacheMode != 3) {
+                                                    contiguousDiskCacheRatio = cacheManager.getContiguousCachedRatio(url)
+                                                    cachedSpansRatios = cacheManager.getCachedSpansRatios(url)
+                                                }
                                                 interactionTimestamp = System.currentTimeMillis()
                                             },
                                             onDragCancel = {
@@ -1089,7 +1183,7 @@ fun CustomVideoPlayer(
                             ) {
                                 val trackWidth = maxWidth
 
-                                // Background Track (Thin dark grey)
+                                // 1. En alt katman: Şeffaf gri arka plan çizgisi
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1097,39 +1191,64 @@ fun CustomVideoPlayer(
                                         .background(Color.White.copy(alpha = 0.25f), RoundedCornerShape(1.5.dp))
                                 )
 
+                                // 2. Disk Katmanı (SARI): Cihazın depolamasına inen tüm parçalar SARI
                                 if (isDownloadedVideo) {
-                                    // Fully Downloaded/Offline Content: Entire track is solid yellow
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .height(3.dp)
                                             .background(VlcBufferYellow, RoundedCornerShape(1.5.dp))
                                     )
+                                } else if (effectiveFastCacheMode != 0 && effectiveFastCacheMode != 3) {
+                                    if (displaySpans.isNotEmpty()) {
+                                        for (span in displaySpans) {
+                                            val startOffset = trackWidth * span.startRatio
+                                            val spanWidth = trackWidth * (span.endRatio - span.startRatio)
+                                            if (spanWidth > 0.dp) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .offset(x = startOffset)
+                                                        .width(spanWidth)
+                                                        .height(3.dp)
+                                                        .background(VlcBufferYellow, RoundedCornerShape(1.5.dp))
+                                                )
+                                            }
+                                        }
+                                    } else if (fastCacheContiguousRatio > 0f) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(trackWidth * fastCacheContiguousRatio)
+                                                .height(3.dp)
+                                                .background(VlcBufferYellow, RoundedCornerShape(1.5.dp))
+                                        )
+                                    }
                                 } else {
-                                    // Solid Yellow Buffer Track for Fast Cache Modes (Synced in real time to actual minutes/seconds buffered)
-                                    if (settings.fastCacheMode != 0) {
-                                        if (fastCacheContiguousRatio > 0f) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(trackWidth * fastCacheContiguousRatio)
-                                                    .height(3.dp)
-                                                    .background(VlcBufferYellow, RoundedCornerShape(1.5.dp))
-                                            )
-                                        }
-                                    } else {
-                                        // RAM Buffered Progress Track (Light Orange for Standard Mode 0)
-                                        if (ramBufferRatio > 0f) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(trackWidth * ramBufferRatio)
-                                                    .height(3.dp)
-                                                    .background(VlcBufferOrange, RoundedCornerShape(1.5.dp))
-                                            )
-                                        }
+                                    if (ramBufferRatio > 0f) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(trackWidth * ramBufferRatio)
+                                                .height(3.dp)
+                                                .background(VlcBufferOrange, RoundedCornerShape(1.5.dp))
+                                        )
                                     }
                                 }
 
-                                // Played Progress Track (VLC Vivid Orange)
+                                // 3. RAM Katmanı (YEŞİL): ExoPlayer'ın anlık RAM tamponu (o an oynatılan konumdan ileriye doğru)
+                                if (ramBufferRatio > progressRatio) {
+                                    val activeStartOffset = trackWidth * progressRatio
+                                    val activeBufferWidth = trackWidth * (ramBufferRatio - progressRatio)
+                                    if (activeBufferWidth > 0.dp) {
+                                        Box(
+                                            modifier = Modifier
+                                                .offset(x = activeStartOffset)
+                                                .width(activeBufferWidth)
+                                                .height(3.dp)
+                                                .background(VlcBufferGreen, RoundedCornerShape(1.5.dp))
+                                        )
+                                    }
+                                }
+
+                                // 4. Oynatılan Katman (TURUNCU): İzlenen mevcut konum
                                 Box(
                                     modifier = Modifier
                                         .width(trackWidth * progressRatio)
@@ -1137,7 +1256,7 @@ fun CustomVideoPlayer(
                                         .background(VlcOrange, RoundedCornerShape(1.5.dp))
                                 )
 
-                                // VLC Thumb (Small vivid orange circle)
+                                // Thumb (Küçük turuncu daire)
                                 Box(
                                     modifier = Modifier
                                         .offset(x = (trackWidth * progressRatio) - (if (isSeeking) 8.dp else 6.dp))

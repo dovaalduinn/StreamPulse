@@ -9,10 +9,10 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface WatchHistoryDao {
-    @Query("SELECT * FROM watch_history ORDER BY lastWatchedTimestamp DESC")
+    @Query("SELECT * FROM watch_history WHERE streamType != 'M3U_STREAM' AND streamType != 'LIVE' ORDER BY lastWatchedTimestamp DESC")
     fun getAllHistory(): Flow<List<WatchHistoryEntity>>
 
-    @Query("SELECT * FROM watch_history")
+    @Query("SELECT * FROM watch_history WHERE streamType != 'M3U_STREAM' AND streamType != 'LIVE'")
     suspend fun getAllHistoryList(): List<WatchHistoryEntity>
 
     @Query("SELECT * FROM watch_history WHERE url = :url LIMIT 1")
@@ -23,6 +23,9 @@ interface WatchHistoryDao {
 
     @Query("DELETE FROM watch_history WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM watch_history WHERE streamType = 'M3U_STREAM' OR streamType = 'LIVE'")
+    suspend fun deleteLiveStreams()
 
     @Query("DELETE FROM watch_history")
     suspend fun clearAll()

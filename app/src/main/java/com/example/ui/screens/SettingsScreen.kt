@@ -275,9 +275,9 @@ fun SettingsScreen(
 
                     val modeDescription = when (settings.fastCacheMode) {
                         0 -> "Standart oynatma. Sadece anlık izlenen kısım bellekte tutulur. Cihaz hafızası harcamaz ancak ileri-geri atlamalarda videonun tekrar yüklenmesi gerekir."
-                        1 -> "Akıllı önbellek. Siz izledikçe videonun ilerleyen kısmını (30 dakikaya kadar) arka planda diske indirir. Geri sarmalar diskten okunur."
-                        2 -> "Kilitli tam önbellek. Videonun tamamını 0'dan sonuna kadar kesintisiz indirir. Sadece indirilmiş sarı bölgeye kadar atlamaya izin verir, sıfır donma sağlar."
-                        3 -> "Serbest tam önbellek. Videonun tamamını arka planda indirir. İndirilmeyen kısımlara da serbestçe atlayabilirsiniz; atlama anında oynatıcıya anında öncelik verilir."
+                        1 -> "Hızlı önbellek (Mod 1). Video arka planda cihazın depolamasına inmeye başlar. ExoPlayer diskin üzerinden seçilen RAM kotası kadar veriyi belleğe alır. Yalnızca diske inmiş sarı bölgelere atlanabilir."
+                        2 -> "Akıllı önbellek (Mod 2). İndirme işlemi kaldığınız anlık konumdan başlayarak ileriye doğru yapılır. İstediğiniz her yere serbestçe atlayabilirsiniz; geride kalan eksik parçalar ileri kısımlar bittiğinde tamamlanır."
+                        3 -> "Sıfır Yıpranma (Mod 3 - RAM-Only). Diske veri yazılmaz; video doğrudan seçilen RAM kotası kadar sadece belleğe indirilir. Diski hiç yıpratmaz, yeşil tampon göstergesiyle serbest atlama imkanı sunar."
                         else -> ""
                     }
 
@@ -294,6 +294,37 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 modifier = Modifier.padding(12.dp)
                             )
+                        }
+                    }
+
+                    if (settings.fastCacheMode != 0) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "RAM Tampon Kotası (Mod ${settings.fastCacheMode})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "ExoPlayer'ın diskin üzerinden RAM'e alacağı maksimum veri miktarı.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        @OptIn(ExperimentalLayoutApi::class)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val ramOptions = listOf(50, 100, 250, 500, 1024)
+                            ramOptions.forEach { mb ->
+                                FilterChip(
+                                    selected = settings.ramBufferLimitMb == mb,
+                                    onClick = {
+                                        viewModel.updateSettings(settings.copy(ramBufferLimitMb = mb))
+                                    },
+                                    label = { Text("${mb} MB", fontSize = 12.sp) }
+                                )
+                            }
                         }
                     }
 

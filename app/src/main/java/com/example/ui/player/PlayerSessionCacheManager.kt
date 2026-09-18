@@ -22,7 +22,14 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 @OptIn(UnstableApi::class)
-class PlayerSessionCacheManager(private val context: Context, private val referer: String? = null, private val userAgent: String? = null, private val headers: Map<String, String> = emptyMap()) {
+class PlayerSessionCacheManager(
+    private val context: Context,
+    private val referer: String? = null,
+    private val userAgent: String? = null,
+    private val headers: Map<String, String> = emptyMap(),
+    private val allowInsecureSsl: Boolean = false,
+    private val ramBufferLimitMb: Int = 100
+) {
 
     private val sessionDir = File(context.cacheDir, "player_sessions/session_${System.currentTimeMillis()}").apply {
         mkdirs()
@@ -34,26 +41,30 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
     val cache = SimpleCache(sessionDir, evictor, databaseProvider)
 
     private val okHttpClient = run {
-        val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
-            object : javax.net.ssl.X509TrustManager {
-                override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-            }
-        )
-        val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
-        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-        val sslSocketFactory = sslContext.socketFactory
-
-        okhttp3.OkHttpClient.Builder()
+        val builder = okhttp3.OkHttpClient.Builder()
             .dns(com.example.util.CustomDnsResolver)
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            .sslSocketFactory(sslSocketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-            .hostnameVerifier { _, _ -> true }
-            .build()
+            .retryOnConnectionFailure(true)
+
+        if (allowInsecureSsl) {
+            val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
+                object : javax.net.ssl.X509TrustManager {
+                    override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                    override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                }
+            )
+            val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
+            sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+            val sslSocketFactory = sslContext.socketFactory
+            builder.sslSocketFactory(sslSocketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
+        }
+
+        builder.build()
     }
 
     private val httpDataSourceFactory = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(okHttpClient).apply {
@@ -122,15 +133,29 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
     @Volatile
     private var pausePreloadUntil = 0L
 
+    private var currentFastCacheMode: Int = 0
+
     fun notifySeekOccurred() {
         pausePreloadUntil = System.currentTimeMillis() + 800L
     }
 
-    fun buildExoPlayer(fastCacheMode: Int): ExoPlayer {
+    fun buildExoPlayer(fastCacheMode: Int, isLiveStream: Boolean = false): ExoPlayer {
+        this.currentFastCacheMode = fastCacheMode
         val loadControlBuilder = DefaultLoadControl.Builder()
             .setAllocator(DefaultAllocator(true, androidx.media3.common.C.DEFAULT_BUFFER_SEGMENT_SIZE))
 
-        when (fastCacheMode) {
+        if (isLiveStream) {
+            loadControlBuilder
+                .setBufferDurationsMs(
+                    /* minBufferMs = */ 6000,
+                    /* maxBufferMs = */ 20000,
+                    /* bufferForPlaybackMs = */ 1000,
+                    /* bufferForPlaybackAfterRebufferMs = */ 2000
+                )
+                .setBackBuffer(0, false)
+                .setTargetBufferBytes(androidx.media3.common.C.LENGTH_UNSET)
+        } else {
+            when (fastCacheMode) {
             0 -> { // Kapalı (Standart Düşük Tampon)
                 loadControlBuilder
                     .setBufferDurationsMs(
@@ -142,52 +167,35 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
                     .setBackBuffer(0, false)
                     .setTargetBufferBytes(androidx.media3.common.C.LENGTH_UNSET)
             }
-            1 -> { // Mod 1 (Akıllı Depolama - Sınırsız Disk & Anlık Konum)
+            1, 2 -> { // Mod 1 & Mod 2 (Arka Plan Disk İndirme & RAM Kotası)
                 loadControlBuilder
                     .setBufferDurationsMs(
-                        /* minBufferMs = */ 20_000,
-                        /* maxBufferMs = */ 1_800_000, // 30 Dakika ileriye kadar agresif olarak diske depola
-                        /* bufferForPlaybackMs = */ 250, // Atlama anında sıfır bekleme
+                        /* minBufferMs = */ 5000,
+                        /* maxBufferMs = */ 15000,
+                        /* bufferForPlaybackMs = */ 250,
                         /* bufferForPlaybackAfterRebufferMs = */ 500
                     )
-                    // Disk önbelleği geçmişi kalıcı tuttuğu için RAM'i şişirmemek adına geri RAM tamponunu ufak tutuyoruz
-                    .setBackBuffer(
-                        /* backBufferDurationMs = */ 15_000,
-                        /* retainBackBufferFromKeyframe = */ true
-                    )
-                    // RAM'i fazla yormaması için maksimum bellek kotası koyuyoruz (Asıl depolama diske yapılıyor)
-                    .setTargetBufferBytes(100 * 1024 * 1024) 
+                    .setBackBuffer(0, false)
+                    .setTargetBufferBytes(ramBufferLimitMb * 1024 * 1024)
                     .setPrioritizeTimeOverSizeThresholds(true)
             }
-            2 -> { // Mod 2 (Bütünsel Depolama & Kısıtlı Atlama)
-                loadControlBuilder
-                    .setBufferDurationsMs(
-                        /* minBufferMs = */ 10_000,
-                        /* maxBufferMs = */ 40_000, // Oynatıcı normal izlesin, CacheWriter diske yazar
-                        /* bufferForPlaybackMs = */ 250, // Atlama anında sıfır bekleme (anında başlasın)
-                        /* bufferForPlaybackAfterRebufferMs = */ 500
-                    )
-                    .setBackBuffer(
-                        /* backBufferDurationMs = */ 30_000, // ExoPlayer RAM yormasın, data diskten gelir
-                        /* retainBackBufferFromKeyframe = */ true
-                    )
-                    .setTargetBufferBytes(androidx.media3.common.C.LENGTH_UNSET)
-            }
-            3 -> { // Mod 3 (Bütünsel Depolama & Serbest Atlama)
+            3 -> { // Mod 3 (Sıfır Yıpranma - RAM-Only / Diskless)
                 loadControlBuilder
                     .setBufferDurationsMs(
                         /* minBufferMs = */ 15_000,
-                        /* maxBufferMs = */ 50_000,
+                        /* maxBufferMs = */ 1_800_000, // 30 Dakika ileriye kadar RAM tamponu
                         /* bufferForPlaybackMs = */ 250,
                         /* bufferForPlaybackAfterRebufferMs = */ 500
                     )
                     .setBackBuffer(
-                        /* backBufferDurationMs = */ 30_000,
+                        /* backBufferDurationMs = */ 15_000,
                         /* retainBackBufferFromKeyframe = */ true
                     )
-                    .setTargetBufferBytes(androidx.media3.common.C.LENGTH_UNSET)
+                    .setTargetBufferBytes(ramBufferLimitMb * 1024 * 1024)
+                    .setPrioritizeTimeOverSizeThresholds(true)
             }
         }
+    }
 
         val mediaSourceFactory = DefaultMediaSourceFactory(smartDataSourceFactory).setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(6))
         return ExoPlayer.Builder(context)
@@ -201,7 +209,13 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
             .build()
     }
 
-    fun startFastPreload(url: String, coroutineScope: CoroutineScope) {
+    fun startFastPreload(
+        url: String,
+        coroutineScope: CoroutineScope,
+        getCurrentPositionMs: () -> Long = { 0L },
+        getTotalDurationMs: () -> Long = { 0L }
+    ) {
+        if (currentFastCacheMode == 3) return
         if (url.isBlank() || url.startsWith("file://") || url.startsWith("content://")) return
         if (url.contains("live") || url.contains("m3u8") || url.contains(".m3u")) {
             return // HLS streams manage their own segment buffering natively via ExoPlayer. Aggressive preload breaks them.
@@ -221,37 +235,39 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
                         kotlinx.coroutines.delay(100)
                     }
 
-                    var nextMissingByte = 0L
-                    var foundMissing = false
-                    val spans = cache.getCachedSpans(cacheKey)
                     val totalLength = cache.getContentMetadata(cacheKey).get(androidx.media3.datasource.cache.ContentMetadata.KEY_CONTENT_LENGTH, -1L)
                     val checkLength = if (totalLength > 0) totalLength else Long.MAX_VALUE
 
-                    if (spans.isNotEmpty()) {
-                        val maxTargetPosition = spans.maxOf { it.position + it.length }
-                        if (maxTargetPosition < checkLength) {
-                            var candidate = maxTargetPosition
-                            while (candidate < checkLength) {
-                                val cachedLen = cache.getCachedLength(cacheKey, candidate, checkLength - candidate)
-                                if (cachedLen <= 0L) {
-                                    nextMissingByte = candidate
-                                    foundMissing = true
-                                    break
-                                } else {
-                                    candidate += cachedLen
-                                    if (candidate < checkLength) {
-                                        nextMissingByte = candidate
-                                        foundMissing = true
-                                    }
-                                }
-                            }
+                    val curMs = getCurrentPositionMs().coerceAtLeast(0L)
+                    val durMs = getTotalDurationMs().coerceAtLeast(0L)
+
+                    val startByte = if (totalLength > 0 && durMs > 0) {
+                        ((curMs.toDouble() / durMs.toDouble()) * totalLength).toLong().coerceIn(0L, totalLength)
+                    } else {
+                        0L
+                    }
+
+                    var nextMissingByte = -1L
+                    var foundMissing = false
+
+                    // Phase 1: Search from startByte to end of file (Priority Preload from current position)
+                    var currentPos = startByte
+                    while (currentPos < checkLength) {
+                        val cachedLen = cache.getCachedLength(cacheKey, currentPos, checkLength - currentPos)
+                        if (cachedLen <= 0L) {
+                            nextMissingByte = currentPos
+                            foundMissing = true
+                            break
+                        } else {
+                            currentPos += cachedLen
                         }
                     }
 
-                    if (!foundMissing) {
-                        var currentPos = 0L
-                        while (currentPos < checkLength) {
-                            val cachedLen = cache.getCachedLength(cacheKey, currentPos, checkLength - currentPos)
+                    // Phase 2: If startByte..end is 100% cached, search backward from 0 to startByte (Backward completion)
+                    if (!foundMissing && startByte > 0L) {
+                        currentPos = 0L
+                        while (currentPos < startByte) {
+                            val cachedLen = cache.getCachedLength(cacheKey, currentPos, startByte - currentPos)
                             if (cachedLen <= 0L) {
                                 nextMissingByte = currentPos
                                 foundMissing = true
@@ -263,13 +279,25 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
                     }
 
                     if (!foundMissing && totalLength > 0) {
-                        break 
+                        // Entire file is cached!
+                        kotlinx.coroutines.delay(2000)
+                        continue
+                    }
+
+                    if (nextMissingByte < 0L) {
+                        nextMissingByte = 0L
+                    }
+
+                    val requestLength = if (totalLength > 0) minOf(chunkSize, totalLength - nextMissingByte) else chunkSize
+                    if (requestLength <= 0L) {
+                        kotlinx.coroutines.delay(1000)
+                        continue
                     }
 
                     val dataSpec = androidx.media3.datasource.DataSpec.Builder()
                         .setUri(uri)
                         .setPosition(nextMissingByte)
-                        .setLength(chunkSize)
+                        .setLength(requestLength)
                         .setFlags(androidx.media3.datasource.DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION)
                         .build()
 
@@ -352,19 +380,42 @@ class PlayerSessionCacheManager(private val context: Context, private val refere
 
     fun getCachedSpansRatios(url: String): List<CacheSpanRange> {
         if (url.isBlank()) return emptyList()
-        val uri = android.net.Uri.parse(url)
-        val cacheKey = cacheDataSourceFactory.cacheKeyFactory.buildCacheKey(androidx.media3.datasource.DataSpec(uri))
-        val totalLength = cache.getContentMetadata(cacheKey).get(androidx.media3.datasource.cache.ContentMetadata.KEY_CONTENT_LENGTH, -1L)
-        if (totalLength <= 0) return emptyList()
-        
-        val list = mutableListOf<CacheSpanRange>()
-        val spans = cache.getCachedSpans(cacheKey)
-        for (span in spans) {
-            val start = (span.position.toFloat() / totalLength.toFloat()).coerceIn(0f, 1f)
-            val end = ((span.position + span.length).toFloat() / totalLength.toFloat()).coerceIn(0f, 1f)
-            list.add(CacheSpanRange(start, end))
+        try {
+            val uri = android.net.Uri.parse(url)
+            val cacheKey = cacheDataSourceFactory.cacheKeyFactory.buildCacheKey(androidx.media3.datasource.DataSpec(uri))
+            val totalLength = cache.getContentMetadata(cacheKey).get(androidx.media3.datasource.cache.ContentMetadata.KEY_CONTENT_LENGTH, -1L)
+            if (totalLength <= 0) return emptyList()
+            
+            val spans = cache.getCachedSpans(cacheKey).sortedBy { it.position }
+            if (spans.isEmpty()) return emptyList()
+
+            val mergedSpans = mutableListOf<CacheSpanRange>()
+            var currentStart = spans[0].position
+            var currentEnd = spans[0].position + spans[0].length
+
+            for (i in 1 until spans.size) {
+                val span = spans[i]
+                if (span.position <= currentEnd) {
+                    currentEnd = maxOf(currentEnd, span.position + span.length)
+                } else {
+                    val sRatio = (currentStart.toFloat() / totalLength.toFloat()).coerceIn(0f, 1f)
+                    val eRatio = (currentEnd.toFloat() / totalLength.toFloat()).coerceIn(0f, 1f)
+                    if (eRatio > sRatio) {
+                        mergedSpans.add(CacheSpanRange(sRatio, eRatio))
+                    }
+                    currentStart = span.position
+                    currentEnd = span.position + span.length
+                }
+            }
+            val sRatio = (currentStart.toFloat() / totalLength.toFloat()).coerceIn(0f, 1f)
+            val eRatio = (currentEnd.toFloat() / totalLength.toFloat()).coerceIn(0f, 1f)
+            if (eRatio > sRatio) {
+                mergedSpans.add(CacheSpanRange(sRatio, eRatio))
+            }
+            return mergedSpans
+        } catch (_: Exception) {
+            return emptyList()
         }
-        return list
     }
 
     fun releaseAndCleanUp() {

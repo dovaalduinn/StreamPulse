@@ -1,29 +1,22 @@
-🚀 Android Video & Medya Oynatıcı + Akıllı Web Sniffer (TV Box / Mobil Uyumlu)
-Merhaba arkadaşlar,
-Geliştirdiğim; hem Android TV Box / Android TV cihazlarda hem de mobil telefon ve tabletlerde sorunsuz çalışan, çok amaçlı ve gelişmiş medya oynatıcısını sizlerle paylaşmak istiyorum.
-Uygulama yalnızca yerel veya uzaktaki videoları oynatmakla kalmıyor; dahili akıllı web tarayıcısı sayesinde web sitelerindeki gizli video akışlarını (HLS, M3U8, MP4, MPD) anında yakalayıp reklamsız ve kesintisiz şekilde oynatmanıza olanak tanıyor.
-🌟 Öne Çıkan Temel Özellikler
-1. 🌐 Gelişmiş Web Tarayıcısı ve Otomatik Akış Yakalayıcı (Sniffer)
-Otomatik Medya Tespiti: Gezindiğiniz web sayfalarında arka planda yüklenen HLS (.m3u8), MP4, Dash akışlarını ve harici altyazıları otomatik olarak yakalar.
-Tek Tıkla Oynatma ve İndirme: Yakalanan video akışlarını doğrudan gelişmiş dahili oynatıcıda açabilir, çalma listenize kaydedebilir veya cihazınıza indirebilirsiniz.
-Dahili Reklam ve Pop-up Engelleyici: Rahatsız edici pop-up'ları ve reklam yönlendirmelerini engelleyerek temiz bir gezinme deneyimi sunar.
-Gizli Mod & Çoklu Sekme: Gizli sekme desteği, yer işaretleri ve arama motoru (Google, Yandex, Bing, DuckDuckGo vb.) seçimi.
-2. 📺 Android TV & TV Box Optimizasyonu
-Sanal Fare (Virtual Cursor): Standart TV kumandası yön tuşlarıyla ekranda fare imleci hareket ettirebilir, web sitelerindeki tıklanması zor butonlara kolayca tıklayabilirsiniz.
-TV Kumandası Tam Uyumu: D-Pad odaklanma göstergeleri ve kumanda kısayolları ile menüler arasında akıcı geçiş.
-Masaüstü / Mobil Görünüm Modu: Tek dokunuşla sayfaları TV ekranına uygun masaüstü (Desktop User-Agent) modunda yükleme.
-3. 🎬 Profesyonel Medya Oynatıcı
-Geniş Format Desteği: M3U8 (Canlı yayın / VOD), MP4, MKV, TS, MPD (DASH) formatlarını ExoPlayer altyapısıyla donma ve takılma olmadan oynatır.
-Gelişmiş Başlık & Referer Desteği: Özel User-Agent ve Referer başlığı gerektiren korumalı akışları sorunsuz açar.
-Altyazı ve Ses Parçası Seçimi: Dahili ve harici altyazı desteği, zaman senkronizasyonu ve çoklu ses kanalı desteği.
-Kaldığın Yerden Devam Etme: İzleme geçmişi sayesinde videolara tam olarak bıraktığınız saniyeden devam edebilirsiniz.
-Hız ve Ekran Oranı Kontrolleri: Oynatma hızı ayarlama (0.5x - 2.0x), tam ekran en boy oranı seçenekleri (Fit, Fill, Zoom, 16:9, 4:3).
-4. 📂 Çalma Listeleri & İndirme Yöneticisi
-M3U / M3U8 Çalma Listesi Desteği: Kendi IPTV / M3U linklerinizi veya yerel listelerinizi ekleyip kategorilere göre izleyebilirsiniz.
-Arka Planda İndirme: Web sitelerinden yakaladığınız videoları cihaz hafızasına kaydedip internetsiz izleyebilirsiniz.
-Yer İşaretleri & İzleme Geçmişi: Favori sitelerinizi kaydedin, önceki ziyaretlerinize ve izleme geçmişinize tek ekrandan ulaşın.
-🛠️ Teknik Bilgiler
-Mimari: %100 Modern Kotlin & Jetpack Compose
-Tasarım: Material Design 3 (Koyu ve Aydınlık tema uyumu)
-Veritabanı: Room Database (Tamamen yerel ve gizlilik odaklı, verileriniz cihazınızda kalır)
-Oynatıcı Altyapısı: Media3 ExoPlayer
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/d5fc64b2-67c6-461c-be09-cf583a5ac723
+
+## Run Locally
+
+**Prerequisites:**  [Android Studio](https://developer.android.com/studio)
+
+
+1. Open Android Studio
+2. Select **Open** and choose the directory containing this project
+3. Allow Android Studio to fix any incompatibilities as it imports the project.
+4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
+5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
+6. Run the app on an emulator or physical device
+7. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.

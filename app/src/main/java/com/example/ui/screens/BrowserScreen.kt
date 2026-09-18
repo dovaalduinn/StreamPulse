@@ -118,13 +118,31 @@ class WebAppInterface(
     private val onRawMediaEventJsonCallback: ((String) -> Unit)? = null,
     private val onRawMediaEventCallback: ((String, String, String, String, String, String, String) -> Unit)? = null
 ) {
+    private var lastCallTimestamp = 0L
+    private var callCountInSecond = 0
+
+    private fun checkRateLimit(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastCallTimestamp > 1000) {
+            lastCallTimestamp = now
+            callCountInSecond = 1
+            return true
+        }
+        callCountInSecond++
+        return callCountInSecond <= 50
+    }
+
     @JavascriptInterface
     fun onRawMediaEventJson(jsonPayload: String) {
+        if (!checkRateLimit()) return
+        if (jsonPayload.length > 10 * 1024) return // Max 10KB
         onRawMediaEventJsonCallback?.invoke(jsonPayload)
     }
 
     @JavascriptInterface
     fun onRawMediaEvent(sourceType: String, url: String, type: String, title: String, duration: String, quality: String, mimeType: String) {
+        if (!checkRateLimit()) return
+        if (url.length > 2048 || title.length > 1024) return
         onRawMediaEventCallback?.invoke(sourceType, url, type, title, duration, quality, mimeType)
     }
 
@@ -250,6 +268,37 @@ private fun applyDesktopMode(webView: WebView, isDesktop: Boolean, context: andr
     }
 }
 
+/**
+ * Pauses and mutes all HTML5 video/audio elements and iframes inside the WebView
+ * so that background audio does not continue playing when the native player is opened.
+ */
+fun pauseAllMediaInWebView(webView: WebView?) {
+    if (webView == null) return
+    try {
+        val pauseJs = """
+            (function() {
+                try {
+                    var mediaElements = document.querySelectorAll('video, audio');
+                    for (var i = 0; i < mediaElements.length; i++) {
+                        var el = mediaElements[i];
+                        el.pause();
+                        el.muted = true;
+                    }
+                    var iframes = document.querySelectorAll('iframe');
+                    for (var j = 0; j < iframes.length; j++) {
+                        try {
+                            iframes[j].contentWindow.postMessage('{"event":"command","func":"pauseVideo","args":""}', '*');
+                            iframes[j].contentWindow.postMessage('{"event":"command","func":"mute","args":""}', '*');
+                        } catch(e) {}
+                    }
+                } catch(e) {}
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(pauseJs, null)
+        webView.onPause()
+    } catch (_: Exception) {}
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BrowserScreen(
@@ -285,6 +334,12 @@ fun BrowserScreen(
     var showTvControlsSheet by remember { mutableStateOf(false) }
     var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
+
+    val historySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val bookmarksSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sniffedSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val tvControlsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val tabsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // Find in Page state
     var isFindInPageVisible by remember { mutableStateOf(false) }
@@ -322,6 +377,19 @@ fun BrowserScreen(
         }
     }
     val browserHistory by viewModel.browserHistory.collectAsState()
+    val activeVideo by viewModel.activeVideo.collectAsState()
+
+    // When the native player is opened or closed, pause/resume web media automatically
+    LaunchedEffect(activeVideo) {
+        if (activeVideo != null) {
+            tabs.forEach { tab ->
+                pauseAllMediaInWebView(tab.webView)
+            }
+        } else {
+            // Resume only the currently active visible tab's webView
+            currentTab.webView?.onResume()
+        }
+    }
 
     val quickBookmarks = listOf(
         "Google" to "https://www.google.com",
@@ -565,7 +633,7 @@ fun BrowserScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.width(4.dp))
+
 
                         // TV Remote & Mouse Controls Shortcut
                         IconButton(
@@ -635,7 +703,16 @@ fun BrowserScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { showSniffedBottomSheet = true }
+                                .clickable {
+                                    showHistorySheet = false
+                                    showBookmarksSheet = false
+                                    showTvControlsSheet = false
+                                    showTabsSheet = false
+                                    showSniffedBottomSheet = true
+                                    coroutineScope.launch {
+                                        sniffedSheetState.show()
+                                    }
+                                }
                                 .padding(horizontal = 14.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -652,7 +729,16 @@ fun BrowserScreen(
                                 )
                             }
                             FilledTonalButton(
-                                onClick = { showSniffedBottomSheet = true },
+                                onClick = {
+                                    showHistorySheet = false
+                                    showBookmarksSheet = false
+                                    showTvControlsSheet = false
+                                    showTabsSheet = false
+                                    showSniffedBottomSheet = true
+                                    coroutineScope.launch {
+                                        sniffedSheetState.show()
+                                    }
+                                },
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                 modifier = Modifier.height(28.dp).tvFocusHighlight(RoundedCornerShape(14.dp))
                             ) {
@@ -706,6 +792,21 @@ fun BrowserScreen(
                                 )
                             }
 
+                            // History Icon next to Home
+                            IconButton(
+                                onClick = {
+                                    currentTab.url = "chrome://history"
+                                },
+                                modifier = Modifier.size(40.dp).tvFocusHighlight(CircleShape)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.History,
+                                    contentDescription = "Geçmiş",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = bottomIconColor
+                                )
+                            }
+
                             // 2. Back
                             IconButton(
                                 onClick = { if (currentTab.webView?.canGoBack() == true) currentTab.webView?.goBack() },
@@ -742,7 +843,14 @@ fun BrowserScreen(
                             IconButton(
                                 onClick = {
                                     if (sniffedLinks.isNotEmpty()) {
+                                        showHistorySheet = false
+                                        showBookmarksSheet = false
+                                        showTvControlsSheet = false
+                                        showTabsSheet = false
                                         showSniffedBottomSheet = true
+                                        coroutineScope.launch {
+                                            sniffedSheetState.show()
+                                        }
                                     } else {
                                         currentTab.webView?.reload()
                                     }
@@ -838,8 +946,15 @@ fun BrowserScreen(
                                         text = { Text("Yer İşaretleri") },
                                         leadingIcon = { Icon(Icons.Default.Bookmark, contentDescription = null, tint = Color(0xFFFBBC04)) },
                                         onClick = {
-                                            showBookmarksSheet = true
                                             showMoreMenu = false
+                                            showSniffedBottomSheet = false
+                                            showHistorySheet = false
+                                            showTvControlsSheet = false
+                                            showTabsSheet = false
+                                            showBookmarksSheet = true
+                                            coroutineScope.launch {
+                                                bookmarksSheetState.show()
+                                            }
                                         }
                                     )
                                     if (currentTab.url.isNotEmpty() && currentTab.url != "about:blank") {
@@ -856,14 +971,7 @@ fun BrowserScreen(
                                             }
                                         )
                                     }
-                                    DropdownMenuItem(
-                                        text = { Text("Geçmiş") },
-                                        leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
-                                        onClick = {
-                                            showHistorySheet = true
-                                            showMoreMenu = false
-                                        }
-                                    )
+
                                     DropdownMenuItem(
                                         text = { Text("Sayfada bul") },
                                         leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
@@ -1546,10 +1654,15 @@ fun BrowserScreen(
                                     applyDesktopMode(view, targetDesktop, context)
                                 }
                                 val isBlank = tab.url.isEmpty() || tab.url == "about:blank"
-                                val shouldBeVisible = tab.id == currentTabId && !isBlank
+                                val shouldBeVisible = tab.id == currentTabId && !isBlank && (activeVideo == null)
                                 view.visibility = if (shouldBeVisible) android.view.View.VISIBLE else android.view.View.GONE
                                 if (shouldBeVisible) {
+                                    view.onResume()
                                     view.postInvalidate()
+                                } else {
+                                    if (tab.id != currentTabId || activeVideo != null) {
+                                        pauseAllMediaInWebView(view)
+                                    }
                                 }
                             },
                             onRelease = { view ->
@@ -1566,6 +1679,23 @@ fun BrowserScreen(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+                }
+
+                // Chrome History Screen (chrome://history)
+                if (currentTab.url == "chrome://history") {
+                    ChromeHistoryScreen(
+                        browserHistory = browserHistory,
+                        onClearHistory = { viewModel.clearBrowserHistory() },
+                        onDeleteHistoryItem = { item -> viewModel.deleteBrowserHistory(item) },
+                        onItemClick = { url ->
+                            urlInput = url
+                            currentTab.url = url
+                            currentTab.webView?.loadUrl(url)
+                        },
+                        onBack = {
+                            currentTab.url = "about:blank"
+                        }
+                    )
                 }
 
                 // Google Chrome New Tab Screen (Home Page)
@@ -1692,7 +1822,13 @@ fun BrowserScreen(
     // TV Box Advanced Controls Bottom Sheet
     if (showTvControlsSheet) {
         ModalBottomSheet(
-            onDismissRequest = { showTvControlsSheet = false }
+            onDismissRequest = {
+                coroutineScope.launch {
+                    tvControlsSheetState.hide()
+                    showTvControlsSheet = false
+                }
+            },
+            sheetState = tvControlsSheetState
         ) {
             Column(
                 modifier = Modifier
@@ -2249,7 +2385,13 @@ fun BrowserScreen(
     // Chrome Bookmarks Modal Bottom Sheet
     if (showBookmarksSheet) {
         ModalBottomSheet(
-            onDismissRequest = { showBookmarksSheet = false }
+            onDismissRequest = {
+                coroutineScope.launch {
+                    bookmarksSheetState.hide()
+                    showBookmarksSheet = false
+                }
+            },
+            sheetState = bookmarksSheetState
         ) {
             Column(
                 modifier = Modifier
@@ -2420,7 +2562,13 @@ fun BrowserScreen(
     // Sniffed Links Modal Sheet
     if (showSniffedBottomSheet) {
         ModalBottomSheet(
-            onDismissRequest = { showSniffedBottomSheet = false }
+            onDismissRequest = {
+                coroutineScope.launch {
+                    sniffedSheetState.hide()
+                    showSniffedBottomSheet = false
+                }
+            },
+            sheetState = sniffedSheetState
         ) {
             Column(
                 modifier = Modifier
@@ -2619,6 +2767,8 @@ fun BrowserScreen(
                                     Button(
                                         onClick = {
                                             showSniffedBottomSheet = false
+                                            // Immediately mute and pause active tab's web player
+                                            tabs.forEach { t -> pauseAllMediaInWebView(t.webView) }
                                             viewModel.playVideo(
                                                 title = link.title,
                                                 url = link.url
@@ -2651,8 +2801,10 @@ fun BrowserScreen(
         var showConfirmClearDialog by remember { mutableStateOf(false) }
 
         ModalBottomSheet(
-            onDismissRequest = { showHistorySheet = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            onDismissRequest = {
+                showHistorySheet = false
+            },
+            sheetState = historySheetState
         ) {
             Column(
                 modifier = Modifier
@@ -2674,7 +2826,7 @@ fun BrowserScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Gezinme Geçmişi",
+                            text = "Tarayıcı Geçmişi",
                             fontWeight = FontWeight.Bold,
                             fontSize = 20.sp
                         )
@@ -2687,8 +2839,17 @@ fun BrowserScreen(
                     }
                     if (browserHistory.isNotEmpty()) {
                         TextButton(
-                            onClick = { showConfirmClearDialog = true }
+                            onClick = {
+                                viewModel.clearBrowserHistory()
+                            }
                         ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Tümünü Temizle",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text("Tümünü Temizle", color = MaterialTheme.colorScheme.error)
                         }
                     }
@@ -2740,7 +2901,7 @@ fun BrowserScreen(
                             )
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "Henüz gezinme geçmişi bulunmuyor.",
+                                text = "Henüz tarama geçmişi yok.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontSize = 14.sp
                             )
@@ -3297,4 +3458,254 @@ private fun isMediaStreamUrl(url: String, request: WebResourceRequest? = null): 
          return true
     }
     return false
+}
+
+@Composable
+private fun ChromeHistoryScreen(
+    browserHistory: List<com.example.data.model.BrowserHistoryEntity>,
+    onClearHistory: () -> Unit,
+    onDeleteHistoryItem: (com.example.data.model.BrowserHistoryEntity) -> Unit,
+    onItemClick: (String) -> Unit,
+    onBack: () -> Unit
+) {
+    var historySearchQuery by remember { mutableStateOf("") }
+    val filteredHistory = remember(browserHistory, historySearchQuery) {
+        if (historySearchQuery.isBlank()) browserHistory
+        else browserHistory.filter {
+            it.title.contains(historySearchQuery, ignoreCase = true) ||
+            it.url.contains(historySearchQuery, ignoreCase = true)
+        }
+    }
+    var showConfirmClearDialog by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(16.dp)
+    ) {
+        // Top Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri", tint = MaterialTheme.colorScheme.onBackground)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                    imageVector = Icons.Default.History,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Geçmiş",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 24.sp,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                if (browserHistory.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Badge(containerColor = MaterialTheme.colorScheme.primaryContainer) {
+                        Text("${browserHistory.size}", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                }
+            }
+
+            if (browserHistory.isNotEmpty()) {
+                TextButton(
+                    onClick = { showConfirmClearDialog = true }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Tümünü Temizle",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Tümünü Temizle", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Search Bar
+        if (browserHistory.isNotEmpty()) {
+            OutlinedTextField(
+                value = historySearchQuery,
+                onValueChange = { historySearchQuery = it },
+                placeholder = { Text("Geçmişte ara...", fontSize = 14.sp) },
+                leadingIcon = {
+                    Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                },
+                trailingIcon = {
+                    if (historySearchQuery.isNotEmpty()) {
+                        IconButton(onClick = { historySearchQuery = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Temizle", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        // Content List / Empty state
+        if (browserHistory.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.HistoryToggleOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Henüz tarama geçmişi yok.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        } else if (filteredHistory.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "\"$historySearchQuery\" için sonuç bulunamadı.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 15.sp
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(filteredHistory, key = { it.id }) { item ->
+                    val formatter = remember { java.text.SimpleDateFormat("dd MMM yyyy, HH:mm", java.util.Locale.getDefault()) }
+                    val dateString = formatter.format(java.util.Date(item.timestamp))
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth(),
+                        tonalElevation = 1.dp
+                    ) {
+                        ListItem(
+                            leadingContent = {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(40.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Language,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            headlineContent = {
+                                Text(
+                                    text = item.title.ifBlank { item.url },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 15.sp
+                                )
+                            },
+                            supportingContent = {
+                                Column {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = item.url,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                                        fontSize = 13.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = dateString,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            trailingContent = {
+                                IconButton(
+                                    onClick = { onDeleteHistoryItem(item) },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Sil",
+                                        modifier = Modifier.size(18.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onItemClick(item.url) }
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showConfirmClearDialog) {
+            AlertDialog(
+                onDismissRequest = { showConfirmClearDialog = false },
+                icon = { Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                title = { Text("Geçmişi Temizle") },
+                text = { Text("Tüm web tarama geçmişiniz silinecektir. Emin misiniz?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onClearHistory()
+                            showConfirmClearDialog = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Evet, Temizle")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showConfirmClearDialog = false }) {
+                        Text("İptal")
+                    }
+                }
+            )
+        }
+    }
 }

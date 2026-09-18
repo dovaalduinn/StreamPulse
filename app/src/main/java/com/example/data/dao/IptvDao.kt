@@ -12,6 +12,9 @@ interface IptvDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPlaylist(playlist: IptvPlaylistEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAllChannels(channels: List<IptvPlaylistEntity>)
+
     @Delete
     suspend fun deletePlaylist(playlist: IptvPlaylistEntity)
 }
