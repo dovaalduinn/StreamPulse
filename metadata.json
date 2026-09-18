@@ -1,0 +1,6 @@
+{
+  "name": "StreamPulse",
+  "description": "Gelişmiş Medya Oynatıcı, M3U Canlı Yayın & Video Linki Oynatıcı",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
