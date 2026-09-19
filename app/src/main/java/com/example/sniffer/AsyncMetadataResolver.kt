@@ -3,8 +3,13 @@ package com.example.sniffer
 import android.media.MediaMetadataRetriever
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.net.InetAddress
+import java.net.URI
 import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 class AsyncMetadataResolver {
@@ -31,47 +36,89 @@ class AsyncMetadataResolver {
         return@withContext updated
     }
 
+    /**
+     * Güvenlik Kontrolü:
+     * Resmi InetAddress metodları kullanılarak döngü (loopback), yerel ağ (site-local),
+     * bağlantı yerel (link-local), yayın (any-local) ve çok noktaya yayın (multicast) adresleri engellenir.
+     * Ayrıca IPv6 Unique Local Address (fc00::/7) bloğu için ilk bayt (0xFC veya 0xFD) kontrolü yapılır.
+     */
+    private fun isSafePublicAddress(address: InetAddress): Boolean {
+        if (address.isLoopbackAddress ||
+            address.isSiteLocalAddress ||
+            address.isLinkLocalAddress ||
+            address.isAnyLocalAddress ||
+            address.isMulticastAddress) {
+            return false
+        }
+
+        val rawBytes = address.address
+        if (rawBytes.size == 16) {
+            val firstByte = rawBytes[0].toInt() and 0xFF
+            if (firstByte == 0xFC || firstByte == 0xFD) {
+                return false
+            }
+        }
+
+        return true
+    }
+
     private fun fetchContent(urlString: String, candidate: MediaCandidate? = null): String? {
-        var connection: HttpURLConnection? = null
         return try {
             val url = URL(urlString)
             val host = url.host ?: return null
-            val inetAddress = java.net.InetAddress.getByName(host)
-            if (inetAddress.isLoopbackAddress || inetAddress.isSiteLocalAddress || inetAddress.isAnyLocalAddress || inetAddress.isLinkLocalAddress) {
+
+            // 1. DNS çözümlemesi BİR KEZ yapılır ve tüm IP adresleri resmi InetAddress metodlarıyla doğrulanır
+            val addresses = InetAddress.getAllByName(host)
+            if (addresses.isEmpty() || addresses.any { !isSafePublicAddress(it) }) {
                 return null
             }
-            val hostAddress = inetAddress.hostAddress ?: ""
-            if (hostAddress.startsWith("127.") || hostAddress.startsWith("10.") || hostAddress.startsWith("192.168.") || hostAddress.startsWith("0.") || hostAddress == "::1" || hostAddress.startsWith("fe80:")) {
-                return null
-            }
-            if (hostAddress.startsWith("172.")) {
-                val parts = hostAddress.split(".")
-                if (parts.size >= 2) {
-                    val second = parts[1].toIntOrNull() ?: 0
-                    if (second in 16..31) return null
+            val pinnedAddress = addresses.first()
+
+            // 2. DNS Rebinding Koruması (Resolve-then-Pin):
+            // OkHttp'ye özel Dns implementasyonu verilerek bağlantının tam olarak doğrulanan IP'ye yapılması
+            // sağlanır, araya girip DNS rebinding saldırısı yapılmasını engeller.
+            val pinnedDns = object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    if (hostname.equals(host, ignoreCase = true)) {
+                        return listOf(pinnedAddress)
+                    }
+                    val targetAddresses = InetAddress.getAllByName(hostname)
+                    val safeList = targetAddresses.filter { isSafePublicAddress(it) }
+                    if (safeList.isEmpty()) throw java.io.IOException("SSRF blocked: unsafe IP for host $hostname")
+                    return safeList
                 }
             }
 
-            connection = url.openConnection() as HttpURLConnection
-            connection.connectTimeout = 4000
-            connection.readTimeout = 4000
-            connection.setRequestProperty("User-Agent", candidate?.userAgent ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+            val client = OkHttpClient.Builder()
+                .dns(pinnedDns)
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+
+            val requestBuilder = Request.Builder()
+                .url(urlString)
+                .header("User-Agent", candidate?.userAgent ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+
             if (candidate?.referer != null) {
-                connection.setRequestProperty("Referer", candidate.referer)
+                requestBuilder.header("Referer", candidate.referer)
                 try {
-                    val originUri = java.net.URI(candidate.referer)
-                    connection.setRequestProperty("Origin", "${originUri.scheme}://${originUri.authority}")
-                } catch(e: Exception) {}
+                    val originUri = URI(candidate.referer)
+                    requestBuilder.header("Origin", "${originUri.scheme}://${originUri.authority}")
+                } catch (_: Exception) {}
             }
+
             candidate?.headers?.forEach { (k, v) ->
-                connection.setRequestProperty(k, v)
+                requestBuilder.header(k, v)
             }
-            val inputStream = connection.inputStream
-            inputStream.bufferedReader().use { it.readText() }
+
+            client.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) return null
+                response.body?.string()
+            }
         } catch (e: Exception) {
             null
-        } finally {
-            try { connection?.disconnect() } catch (_: Exception) {}
         }
     }
 
@@ -195,6 +242,22 @@ class AsyncMetadataResolver {
     }
 
     private fun resolveStandardMedia(candidate: MediaCandidate): MediaCandidate {
+        // SSRF Ön Kontrolü (Pre-check):
+        // MediaMetadataRetriever kendi yerel C++ katmanında DNS çözümlemesi yaptığından
+        // fetchContent()'teki gibi özel bir Dns pini uygulanamaz. Ancak setDataSource çağrısından önce
+        // host adının çözülüp isSafePublicAddress() ile doğrulanması, yerel ağ, loopback ve ULA IP'lerine
+        // karşı temel ve etkili bir SSRF ön koruması sağlar.
+        try {
+            val url = URL(candidate.url)
+            val host = url.host ?: return candidate
+            val addresses = InetAddress.getAllByName(host)
+            if (addresses.isEmpty() || addresses.any { !isSafePublicAddress(it) }) {
+                return candidate
+            }
+        } catch (e: Exception) {
+            return candidate
+        }
+
         val retriever = MediaMetadataRetriever()
         try {
             val headers = HashMap<String, String>()

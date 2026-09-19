@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
+    <!--
+      IPTV Kararı ve Güvenlik Açıklaması:
+      StreamPulse; harici IPTV akışları (.m3u, .m3u8, .ts, .mpd), yerel ağ tuner/ağ geçidi cihazları
+      (ör. Enigma2, HDHomeRun, Xtream Codes) ve uygulama içi web tarayıcısı üzerinden internetteki
+      farklı video kaynaklarını oynatır ve indirir. Bu kaynakların önemli bir kısmı doğrudan
+      şifresiz "http://" protokolü kullanmaktadır. "cleartextTrafficPermitted=false" yapılması
+      tüm HTTP IPTV yayınlarını ve web akışlarını bloke ederek uygulamanın temel işlevini bozacağından,
+      base-config düzeyinde cleartext trafiğine izin verilmiştir.
+    -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

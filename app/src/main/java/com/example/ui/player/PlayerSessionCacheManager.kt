@@ -50,18 +50,30 @@ class PlayerSessionCacheManager(
             .retryOnConnectionFailure(true)
 
         if (allowInsecureSsl) {
-            val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
-                object : javax.net.ssl.X509TrustManager {
-                    override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                    override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+            // Güvenlik İyileştirmesi: Kör hostnameVerifier { _, _ -> true } bypass'ı kaldırıldı.
+            // OkHttp'nin varsayılan (JDK) hostname doğrulaması korunur. Böylece sertifikanın hem güvenilir CA'dan
+            // gelmesi hem de hedef host adıyla eşleşmesi zorunlu kılınır.
+            // TODO: İleride kendinden imzalı (self-signed) IPTV sunucuları için Ayarlar ekranında açık bir kullanıcı onayı
+            // ve sertifika içe aktarma mekanizması tasarlanabilir; otomatik bypass uygulanmaz.
+            try {
+                val trustManagerFactory = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
+                ).apply {
+                    init(null as java.security.KeyStore?)
                 }
-            )
-            val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
-            sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-            val sslSocketFactory = sslContext.socketFactory
-            builder.sslSocketFactory(sslSocketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-                .hostnameVerifier { _, _ -> true }
+                val systemTrustManager = trustManagerFactory.trustManagers
+                    .filterIsInstance<javax.net.ssl.X509TrustManager>()
+                    .firstOrNull()
+
+                if (systemTrustManager != null) {
+                    val sslContext = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+                        init(null, arrayOf(systemTrustManager), java.security.SecureRandom())
+                    }
+                    builder.sslSocketFactory(sslContext.socketFactory, systemTrustManager)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PlayerCacheManager", "SSL yapılandırması başlatılamadı", e)
+            }
         }
 
         builder.build()

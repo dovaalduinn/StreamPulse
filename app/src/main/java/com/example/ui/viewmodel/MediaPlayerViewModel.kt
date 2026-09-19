@@ -212,6 +212,20 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
         startPositionMs: Long = 0L,
         isOffline: Boolean = false
     ) {
+        // Güvenlik Doğrulaması:
+        // isOffline == false (sniffer, IPTV, kullanıcı girişi, web): URL MUTLAKA UrlUtils.isValidHttpUrl() testinden geçmeli.
+        // "file://" veya "content://" şemaları isOffline=false üzerinden asla kabul edilmez, doğrudan reddedilir.
+        // isOffline == true (uygulama içi DownloadsScreen tarafından indirilmiş yerel dosyalar): geçerli yerel dosya/URI yolları serbestçe geçer.
+        if (!isOffline) {
+            if (!com.example.util.UrlUtils.isValidHttpUrl(url)) {
+                return
+            }
+        } else {
+            val isLocalValid = url.startsWith("file://") || url.startsWith("content://") || java.io.File(url).exists() || com.example.util.UrlUtils.isValidHttpUrl(url)
+            if (!isLocalValid) {
+                return
+            }
+        }
         val isM3u = url.endsWith(".m3u8") || url.contains("m3u8") || url.contains("live")
         val safeTitle = title.ifBlank { url.substringAfterLast("/").substringBefore("?") }
         
@@ -326,20 +340,19 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun addSniffedSubtitle(url: String, language: String = "", label: String = "") {
+        // Güvenlik Doğrulaması: Yalnızca geçerli http/https URL'leri kabul edilir.
+        if (!com.example.util.UrlUtils.isValidHttpUrl(url)) return
         streamSnifferManager.parseRawEvent("WEBVIEW_NETWORK", url, "Subtitle", label, language, "", "text/vtt")
-        return
-    // Legacy logic disabled below
-        if (url.isBlank() || _sniffedSubtitles.value.any { it.url == url }) return
-        val list = _sniffedSubtitles.value.toMutableList()
-        list.add(SubtitleTrack(url, language, label))
-        _sniffedSubtitles.value = list.takeLast(20)
     }
 
     fun addSniffedLinkJson(jsonStr: String) {
         try {
             val jsonObj = org.json.JSONObject(jsonStr)
-            val sourceType = jsonObj.optString("sourceType")
             val url = jsonObj.optString("url")
+            // Güvenlik Doğrulaması: Yalnızca geçerli http/https URL'leri kabul edilir.
+            if (!com.example.util.UrlUtils.isValidHttpUrl(url)) return
+
+            val sourceType = jsonObj.optString("sourceType")
             val type = jsonObj.optString("type", "Unknown")
             val title = jsonObj.optString("title")
             val duration = jsonObj.optString("duration")
@@ -381,208 +394,10 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun addSniffedLink(url: String, title: String, jsDuration: String = "", jsQuality: String = "", referer: String? = null, userAgent: String? = null, headers: Map<String, String> = emptyMap()) {
+        // Güvenlik Doğrulaması: Yalnızca geçerli http/https URL'leri kabul edilir.
+        if (!com.example.util.UrlUtils.isValidHttpUrl(url)) return
+        // Mükerrer çağrı temizlendi: headers parametresini de taşıyan tek parseRawEvent çağrısı kullanılır.
         streamSnifferManager.parseRawEvent("WEBVIEW_NETWORK", url, "Video", title, jsDuration, jsQuality, null, false, false, referer, userAgent, headers)
-
-        streamSnifferManager.parseRawEvent("WEBVIEW_NETWORK", url, "Video", title, jsDuration, jsQuality, null, false, false, referer, userAgent)
-        return
-    // Legacy logic disabled below
-        if (url.isBlank() || _sniffedLinks.value.any { it.url == url || it.audioUrl == url }) return
-
-        // Strict Auto-Merge Logic for Demuxed Streams
-        val currentUri = try { android.net.Uri.parse(url) } catch(e: Exception) { null }
-        val filename = currentUri?.path?.substringAfterLast("/") ?: ""
-        
-        val isMaster = filename.equals("master.m3u8", ignoreCase = true) || filename.equals("index.m3u8", ignoreCase = true) || filename.equals("playlist.m3u8", ignoreCase = true)
-        val isAudio = filename.contains("audio", ignoreCase = true) || filename.contains("aac", ignoreCase = true) || filename.contains("-a1", ignoreCase = true) || filename.contains("-a2", ignoreCase = true) || filename.contains("-a3", ignoreCase = true) || filename.contains("-a.", ignoreCase = true) || filename.contains("_a.", ignoreCase = true)
-        val isVideo = filename.contains("video", ignoreCase = true) || filename.contains("-v1", ignoreCase = true) || filename.contains("-v2", ignoreCase = true) || filename.contains("-v3", ignoreCase = true) || filename.contains("-v.", ignoreCase = true) || filename.contains("_v.", ignoreCase = true)
-        
-        if (!isMaster && (isAudio || isVideo)) {
-            try {
-                val existingLinks = _sniffedLinks.value.toMutableList()
-                var merged = false
-                
-                for (i in existingLinks.indices) {
-                    val existing = existingLinks[i]
-                    if (existing.isMerged) continue
-                    
-                    val existingUri = android.net.Uri.parse(existing.url)
-                    val existingFilename = existingUri.path?.substringAfterLast("/") ?: ""
-                    val existingIsMaster = existingFilename.equals("master.m3u8", ignoreCase = true) || existingFilename.equals("index.m3u8", ignoreCase = true) || existingFilename.equals("playlist.m3u8", ignoreCase = true)
-                    
-                    if (!existingIsMaster && currentUri?.host == existingUri.host) {
-                        val currentDirPath = currentUri?.path?.substringBeforeLast("/") ?: ""
-                        val existingDirPath = existingUri.path?.substringBeforeLast("/") ?: ""
-                        
-                        // Exact match on directory structure (Rapidrame puts a/v in same dir)
-                        if (currentDirPath == existingDirPath && currentDirPath.isNotEmpty()) {
-                            val existingIsAudio = existingFilename.contains("audio", ignoreCase = true) || existingFilename.contains("aac", ignoreCase = true) || existingFilename.contains("-a1", ignoreCase = true) || existingFilename.contains("-a2", ignoreCase = true) || existingFilename.contains("-a3", ignoreCase = true) || existingFilename.contains("-a.", ignoreCase = true) || existingFilename.contains("_a.", ignoreCase = true)
-                            val existingIsVideo = existingFilename.contains("video", ignoreCase = true) || existingFilename.contains("-v1", ignoreCase = true) || existingFilename.contains("-v2", ignoreCase = true) || existingFilename.contains("-v3", ignoreCase = true) || existingFilename.contains("-v.", ignoreCase = true) || existingFilename.contains("_v.", ignoreCase = true)
-                            
-                            if (isAudio && (existingIsVideo || !existingIsAudio)) {
-                                existingLinks[i] = existing.copy(audioUrl = url, isMerged = true)
-                                _sniffedLinks.value = existingLinks
-                                merged = true
-                                break
-                            } else if (isVideo && (existingIsAudio || !existingIsVideo)) {
-                                existingLinks[i] = existing.copy(url = url, audioUrl = existing.url, isMerged = true)
-                                _sniffedLinks.value = existingLinks
-                                merged = true
-                                break
-                            }
-                        }
-                    }
-                }
-                if (merged) return
-            } catch (e: Exception) {
-                // Ignore parse errors and fallback to standard adding
-            }
-        }
-
-        val format = guessFormat(url)
-        val quality = if (jsQuality.isNotBlank()) jsQuality else guessQuality(url)
-        val duration = jsDuration
-
-        _sniffedLinks.value = (_sniffedLinks.value + SniffedMedia(url, title, format, quality, duration)).takeLast(20)
-
-        // Background probing for manifest (M3U8) or MP4/TS data
-        if (duration.isBlank() || quality == "Otomatik") {
-            viewModelScope.launch(Dispatchers.IO) {
-                probeMediaInfo(url)
-            }
-        }
-    }
-
-    private suspend fun probeMediaInfo(url: String) {
-        try {
-            var newQuality: String? = null
-            var newDuration: String? = null
-
-            if (url.contains(".m3u8") || url.contains("m3u8")) {
-                var connection: HttpURLConnection? = null
-                var childConn: HttpURLConnection? = null
-                try {
-                    connection = URL(url).openConnection() as HttpURLConnection
-                    connection.connectTimeout = 3000
-                    connection.readTimeout = 3000
-                    val content = connection.inputStream.bufferedReader().use { it.readText() }
-                    
-                    val resRegex = "RESOLUTION=\\d+x(\\d+)".toRegex()
-                    val resMatch = resRegex.find(content)
-                    if (resMatch != null) {
-                        resMatch.groupValues[1].toIntOrNull()?.let { newQuality = "${it}p" }
-                    }
-                    
-                    val extinfRegex = "#EXTINF:([0-9\\.]+),".toRegex()
-                    val extinfMatches = extinfRegex.findAll(content)
-                    var totalSeconds = 0.0
-                    for (match in extinfMatches) {
-                        totalSeconds += match.groupValues[1].toDoubleOrNull() ?: 0.0
-                    }
-                    
-                    // If master playlist has no EXTINF directly, check child variant playlists
-                    if (totalSeconds == 0.0) {
-                        val childM3u8Lines = content.lines().filter { line ->
-                            val trimmed = line.trim()
-                            trimmed.isNotBlank() && !trimmed.startsWith("#") && (trimmed.contains(".m3u8") || !trimmed.contains("://"))
-                        }
-                        if (childM3u8Lines.isNotEmpty()) {
-                            val firstChild = childM3u8Lines.first().trim()
-                            val childUrl = if (firstChild.startsWith("http://") || firstChild.startsWith("https://")) {
-                                firstChild
-                            } else {
-                                val base = url.substringBeforeLast("/")
-                                "$base/$firstChild"
-                            }
-                            try {
-                                childConn = URL(childUrl).openConnection() as HttpURLConnection
-                                childConn.connectTimeout = 3000
-                                childConn.readTimeout = 3000
-                                val childContent = childConn.inputStream.bufferedReader().use { it.readText() }
-                                val childMatches = extinfRegex.findAll(childContent)
-                                for (match in childMatches) {
-                                    totalSeconds += match.groupValues[1].toDoubleOrNull() ?: 0.0
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    }
-
-                    if (totalSeconds > 0) {
-                        val h = (totalSeconds / 3600).toInt()
-                        val m = ((totalSeconds % 3600) / 60).toInt()
-                        val s = (totalSeconds % 60).toInt()
-                        newDuration = if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%d:%02d", m, s)
-                    }
-                } finally {
-                    try { connection?.disconnect() } catch (_: Exception) {}
-                    try { childConn?.disconnect() } catch (_: Exception) {}
-                }
-            } else if (!url.endsWith(".m3u8")) {
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(url, HashMap<String, String>())
-                    val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                    val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                    
-                    durStr?.toLongOrNull()?.let { ms ->
-                        if (ms > 0) {
-                            val seconds = ms / 1000
-                            val h = seconds / 3600
-                            val m = (seconds % 3600) / 60
-                            val s = seconds % 60
-                            newDuration = if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%d:%02d", m, s)
-                        }
-                    }
-                    heightStr?.toIntOrNull()?.let { h -> if (h > 0) newQuality = "${h}p" }
-                } catch (e: Exception) {
-                } finally {
-                    retriever.release()
-                }
-            }
-
-            if (newQuality != null || newDuration != null) {
-                _sniffedLinks.update { list ->
-                    list.map { item ->
-                        if (item.url == url) {
-                            item.copy(
-                                quality = newQuality ?: item.quality,
-                                duration = newDuration ?: item.duration
-                            )
-                        } else item
-                    }
-                }
-            }
-        } catch (e: Exception) { }
-    }
-
-    private fun guessFormat(url: String): String {
-        val lowerUrl = url.lowercase()
-        val withoutQuery = lowerUrl.substringBefore("?")
-        return when {
-            withoutQuery.endsWith(".m3u8") || lowerUrl.contains("m3u8") -> "M3U8 HLS"
-            withoutQuery.endsWith(".mp4") || lowerUrl.contains(".mp4") -> "MP4"
-            withoutQuery.endsWith(".ts") || lowerUrl.contains(".ts?") -> "TS Segment"
-            withoutQuery.endsWith(".webm") || lowerUrl.contains(".webm") -> "WEBM"
-            withoutQuery.endsWith(".mkv") -> "MKV"
-            withoutQuery.endsWith(".avi") -> "AVI"
-            withoutQuery.endsWith(".mpd") || lowerUrl.contains(".mpd") -> "DASH"
-            else -> "Video"
-        }
-    }
-
-    private fun guessQuality(url: String): String {
-        val lowerUrl = url.lowercase()
-        return when {
-            lowerUrl.contains("4k") || lowerUrl.contains("2160p") -> "4K"
-            lowerUrl.contains("1440p") -> "1440p"
-            lowerUrl.contains("1080p") || lowerUrl.contains("1080") -> "1080p"
-            lowerUrl.contains("720p") || lowerUrl.contains("720") -> "720p"
-            lowerUrl.contains("480p") || lowerUrl.contains("480") -> "480p"
-            lowerUrl.contains("360p") || lowerUrl.contains("360") -> "360p"
-            lowerUrl.contains("240p") || lowerUrl.contains("240") -> "240p"
-            lowerUrl.contains("hd") -> "HD"
-            lowerUrl.contains("sd") -> "SD"
-            else -> "Otomatik"
-        }
     }
 
     fun clearSniffedLinks() {
@@ -671,7 +486,7 @@ class MediaPlayerViewModel(application: Application) : AndroidViewModel(applicat
         userAgent: String? = null,
         headers: Map<String, String>? = null
     ) {
-        if (url.isBlank()) return
+        if (!com.example.util.UrlUtils.isValidHttpUrl(url)) return
         val application = getApplication<Application>()
         val intent = Intent(application, com.example.service.DownloadService::class.java).apply {
             action = "START"

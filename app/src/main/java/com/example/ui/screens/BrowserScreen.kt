@@ -112,6 +112,7 @@ private fun dispatchVirtualClick(webView: WebView?, x: Float, y: Float) {
 }
 
 class WebAppInterface(
+    private val expectedToken: String,
     private val onMediaFound: (String, String, String, String) -> Unit,
     private val onSubtitleFoundCallback: ((String, String, String) -> Unit)? = null,
     private val popupBlockerEnabled: Boolean = true,
@@ -120,6 +121,12 @@ class WebAppInterface(
 ) {
     private var lastCallTimestamp = 0L
     private var callCountInSecond = 0
+
+    // Güvenlik İyileştirmesi: Yalnızca uygulamanın enjekte ettiği SNIFFER_JS betiğinden gelen
+    // geçerli nonce/token'a sahip çağrılar kabul edilir, sayfadaki yabancı JS çağrıları engellenir.
+    private fun validateToken(token: String?): Boolean {
+        return !token.isNullOrEmpty() && token == expectedToken
+    }
 
     private fun checkRateLimit(): Boolean {
         val now = System.currentTimeMillis()
@@ -133,41 +140,48 @@ class WebAppInterface(
     }
 
     @JavascriptInterface
-    fun onRawMediaEventJson(jsonPayload: String) {
+    fun onRawMediaEventJson(jsonPayload: String, token: String? = null) {
+        if (!validateToken(token)) return
         if (!checkRateLimit()) return
         if (jsonPayload.length > 10 * 1024) return // Max 10KB
         onRawMediaEventJsonCallback?.invoke(jsonPayload)
     }
 
     @JavascriptInterface
-    fun onRawMediaEvent(sourceType: String, url: String, type: String, title: String, duration: String, quality: String, mimeType: String) {
+    fun onRawMediaEvent(sourceType: String, url: String, type: String, title: String, duration: String, quality: String, mimeType: String, token: String? = null) {
+        if (!validateToken(token)) return
         if (!checkRateLimit()) return
         if (url.length > 2048 || title.length > 1024) return
         onRawMediaEventCallback?.invoke(sourceType, url, type, title, duration, quality, mimeType)
     }
 
     @JavascriptInterface
-    fun isPopupBlockerEnabled(): Boolean {
+    fun isPopupBlockerEnabled(token: String? = null): Boolean {
+        if (!validateToken(token)) return true
         return popupBlockerEnabled
     }
 
     @JavascriptInterface
-    fun onMediaUrlFound(url: String, title: String) {
+    fun onMediaUrlFound(url: String, title: String, token: String? = null) {
+        if (!validateToken(token)) return
         onMediaFound(url, title, "", "")
     }
 
     @JavascriptInterface
-    fun onMediaUrlFoundWithDuration(url: String, title: String, duration: String) {
+    fun onMediaUrlFoundWithDuration(url: String, title: String, duration: String, token: String? = null) {
+        if (!validateToken(token)) return
         onMediaFound(url, title, duration, "")
     }
 
     @JavascriptInterface
-    fun onMediaFoundAdvanced(url: String, title: String, duration: String, quality: String) {
+    fun onMediaFoundAdvanced(url: String, title: String, duration: String, quality: String, token: String? = null) {
+        if (!validateToken(token)) return
         onMediaFound(url, title, duration, quality)
     }
 
     @JavascriptInterface
-    fun onSubtitleFound(url: String, language: String, label: String) {
+    fun onSubtitleFound(url: String, language: String, label: String, token: String? = null) {
+        if (!validateToken(token)) return
         onSubtitleFoundCallback?.invoke(url, language, label)
     }
 }
@@ -1372,8 +1386,10 @@ fun BrowserScreen(
                                         displayZoomControls = false
                                         setSupportZoom(true)
                                         textZoom = textZoomPercent
-                                        allowFileAccess = true
-                                        allowContentAccess = true
+                                        // Güvenlik İyileştirmesi: Yerel dosya sistemi saldırılarını (file:// ve content://) önlemek için
+                                        // WebView dosya ve içerik erişimleri kapatılmıştır.
+                                        allowFileAccess = false
+                                        allowContentAccess = false
                                         setSupportMultipleWindows(appSettings.popupBlockerEnabled) // Bloklama kapalıysa mevcut sekmede açsın
                                         javaScriptCanOpenWindowsAutomatically = !appSettings.popupBlockerEnabled
                                         offscreenPreRaster = true
@@ -1383,6 +1399,7 @@ fun BrowserScreen(
                                     applyDesktopMode(this, isDesktop, ctx)
 
                                     addJavascriptInterface(WebAppInterface(
+                                        expectedToken = com.example.sniffer.BrowserSnifferScriptV2.SNIFFER_SECRET_TOKEN,
                                         onRawMediaEventJsonCallback = { jsonStr ->
                                             coroutineScope.launch {
                                                 viewModel.addSniffedLinkJson(jsonStr)

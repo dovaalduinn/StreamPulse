@@ -1,16 +1,20 @@
 package com.example.sniffer
 
 object BrowserSnifferScriptV2 {
-    const val SNIFFER_JS = """
+    // Güvenlik İyileştirmesi: Web sayfasındaki üçüncü taraf zararlı betiklerin WebAppInterface metodlarına
+    // doğrudan erişmesini önlemek için gizli bir token/nonce tanımlanır ve yalnızca bu script tarafından iletilir.
+    val SNIFFER_SECRET_TOKEN: String = java.util.UUID.randomUUID().toString()
+
+    fun getSnifferJs(token: String = SNIFFER_SECRET_TOKEN): String = """
         (function() {
             if (window._pulseSnifferInjected) return;
             window._pulseSnifferInjected = true;
             
+            var _SECRET_TOKEN = "$token";
             var sbCounter = 0;
             var msCounter = 0;
             
             // Helper functions
-            var cachedReporter = (window.AndroidSniffer && window.AndroidSniffer.onRawMediaEventJson) ? window.AndroidSniffer.onRawMediaEventJson.bind(window.AndroidSniffer) : null;
             function report(type, url, mediaType, title, duration, quality, mime, extraArgs) {
                 if (!url || typeof url !== 'string') return;
                 var data = {
@@ -32,7 +36,7 @@ object BrowserSnifferScriptV2 {
                 }
                 try {
                     if (window.AndroidSniffer && window.AndroidSniffer.onRawMediaEventJson) {
-                        window.AndroidSniffer.onRawMediaEventJson(JSON.stringify(data));
+                        window.AndroidSniffer.onRawMediaEventJson(JSON.stringify(data), _SECRET_TOKEN);
                     }
                 } catch(e) {}
             }
@@ -304,4 +308,6 @@ object BrowserSnifferScriptV2 {
 
         })();
     """
+
+    val SNIFFER_JS: String get() = getSnifferJs(SNIFFER_SECRET_TOKEN)
 }

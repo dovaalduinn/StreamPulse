@@ -87,6 +87,11 @@ class StreamSnifferManager {
         initiatorType: String? = null,
         iframeUrl: String? = null
     , correlatedUrl: String? = null) {
+        // Güvenlik Doğrulaması: Yalnızca geçerli http/https şemaları işlenir, diğer tüm şemalar sessizce reddedilir.
+        if (!com.example.util.UrlUtils.isValidHttpUrl(url)) {
+            return
+        }
+
         val source = try { MediaSourceType.valueOf(sourceType) } catch (e: Exception) { MediaSourceType.WEBVIEW_NETWORK }
         
         var bestCandidate: MediaCandidate? = null
@@ -165,9 +170,8 @@ class StreamSnifferManager {
         
         // 2. Resolve (Type, Segments)
         val resolved = resolver.resolve(correlated)
+        // Güvenli debug loglama: logDebugEvent() yalnızca BuildConfig.DEBUG iken çalışır ve URL token'larını maskeler.
         logDebugEvent(resolved)
-
-        android.util.Log.d("SNIFFER_DEBUG", "Received candidate: ${resolved.url}")
         
         if (!resolved.isResolvable) return
         
@@ -263,7 +267,7 @@ class StreamSnifferManager {
         if (!shouldAdd) return
 
         if (currentList.size < MAX_CANDIDATES) {
-            android.util.Log.d("SNIFFER_DEBUG", "Added to list: ${scoredCandidate.url}")
+            logDebugEvent(scoredCandidate)
             currentList.add(0, scoredCandidate)
             _candidates.value = currentList
             
