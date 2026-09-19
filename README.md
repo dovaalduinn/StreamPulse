@@ -90,3 +90,5 @@ Modern web sitelerinde parçalanmış (Blob, MSE, HLS, DASH) olarak sunulan medy
 * **Güvenli JS Köprüsü:** Web sayfasına enjekte edilen `WebAppInterface`, yalnızca uygulamanın bildiği oturum belirteci (`SNIFFER_SECRET_TOKEN`) ile yetkilendirilir.
 * **WebView İzolasyonu:** `allowFileAccess` ve `allowContentAccess` kapatılarak yerel dosya sistemi saldırıları engellenmiştir.
 * **ProGuard / R8 & Minifikasyon:** Kod optimizasyonu ve küçültme aktif edilerek güvenlik ve performans artırılmıştır.
+
+* İLETİŞİM: dovaalduinn@gmail.com
